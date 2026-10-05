@@ -37,12 +37,13 @@ class UOp:
         if self.op in ("ADD", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
         if self.op == "PARAM": return self.arg.dtype 
         if self.op in ("BUFFER", "ALLOC") : return self.arg.dtype 
-        if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK") : return self.src[0].dtype 
-        if self.op == "VAR" : return "int"
+        if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK", "END") : return self.src[0].dtype 
+        if self.op in ("VAR", "RANGE")  : return "int"
         if self.op in ("CMPNE", "CMPLT"): return "bool"
         if self.op  == "CAST": return self.arg 
         if self.op == "LOG2":  return "float"
         if self.op in ( "STORE", "LINEAR") : return "void"
+    
 
     @property
     def shape(self):
@@ -55,7 +56,7 @@ class UOp:
         if self.op in ("BUFFER", "ALLOC"):
             return (self.arg.size, ) 
 
-        if self.op in  ( "INDEX","LOAD", "STORE", "VAR", "LINEAR"):
+        if self.op in  ( "INDEX","LOAD", "STORE", "VAR", "LINEAR", "RANGE"):
             return ()
 
         if self.op == "RESHAPE":
@@ -120,6 +121,8 @@ class UOp:
             new_shape =  (n,) + old_shape
             return tuple(new_shape)
 
+        if self.op == "END":
+            return self.src[0].shape 
     @property
     def addrspace(self):
         if self.op in ("CONST", "PARAM", "ADD", "MUL", "VAR"):
@@ -238,6 +241,8 @@ def run(expr):
         }
 
         return eval_call_body(body, env)
+
+
 
 
 def eval_call_body(node, env):
@@ -467,9 +472,11 @@ def render(expr, indexed=False):
         return str(expr.arg.name)
 
     if expr.op == "INDEX":
-        base = render(expr.src[0])
+        base = expr.src[0]
         idx = render(expr.src[1])
-        return f"{base}[{idx}]"
+        if base.op in ("BUFFER", "ALLOC"):
+            return f"{base.arg.name}[{idx}]"
+        return f"{render(base)}[{idx}]"
     if expr.op == "LOAD":
         return render(expr.src[0])
 
@@ -496,9 +503,8 @@ def render(expr, indexed=False):
     if expr.op == "CAST":
         return f"(({expr.arg}){render(expr.src[0])})"
     if expr.op == "RANGE":
-        start = render(expr.src[0])
-        end = render(expr.src[1])
-        return f"for (int {expr.arg} = {start}; {expr.arg} < {end}; {expr.arg}++)"
+        end = render(expr.src[0])
+        return f"for (int {expr.arg} = 0; {expr.arg} < {end}; {expr.arg}++)"
 
 
     if expr.op == "ALLOC":

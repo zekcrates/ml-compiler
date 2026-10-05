@@ -789,3 +789,1022 @@ def test_linearized_render():
     code = render(linearize(store))
 
     assert code.endswith("a[0] = 5.0;")
+
+
+
+def test_range_basic():
+    r = UOp("RANGE", (C(3),), arg="i")
+
+    assert r.dtype == "int"
+    assert r.shape == ()
+    assert render(r) == "for (int i = 0; i < 3; i++)"
+
+
+def test_end_basic():
+    loop = UOp(
+        "RANGE",
+        (
+            UOp("CONST", arg=3),
+        ),
+        arg="i",
+    )
+
+    value = UOp("CONST", arg=7)
+
+    end = UOp(
+        "END",
+        (
+            value,
+            loop,
+        ),
+    )
+
+    assert end.src == (value, loop)
+    assert end.dtype == value.dtype
+    assert end.shape == value.shape
+    assert render(end) == "}"
+
+
+def test_render_loop_with_end():
+    loop = UOp(
+        "RANGE",
+        (
+            UOp("CONST", arg=3),
+        ),
+        arg="i",
+    )
+
+    out = UOp(
+        "BUFFER",
+        arg=ParamArg("out", "float", 3),
+    )
+
+    store = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    out,
+                    UOp("VAR", arg="i"),
+                ),
+            ),
+            UOp("CONST", arg=1.0),
+        ),
+    )
+
+    end = UOp(
+        "END",
+        (
+            out,
+            loop,
+        ),
+    )
+
+    code = "\n".join([
+        render(loop),
+        "    " + render(store),
+        render(end),
+    ])
+
+    assert code == (
+        "for (int i = 0; i < 3; i++)\n"
+        "    out[i] = 1.0;\n"
+        "}"
+    )
+
+
+def test_nested_loops_render():
+    outer = UOp(
+        "RANGE",
+        (UOp("CONST", arg=2),),
+        arg="i",
+    )
+
+    inner = UOp(
+        "RANGE",
+        (UOp("CONST", arg=3),),
+        arg="j",
+    )
+
+    end_inner = UOp(
+        "END",
+        (
+            UOp("CONST", arg=0),
+            inner,
+        ),
+    )
+
+    end_outer = UOp(
+        "END",
+        (
+            UOp("CONST", arg=0),
+            outer,
+        ),
+    )
+
+    code = "\n".join([
+        render(outer),
+        "    " + render(inner),
+        "    " + render(end_inner),
+        render(end_outer),
+    ])
+
+    assert code == (
+        "for (int i = 0; i < 2; i++)\n"
+        "    for (int j = 0; j < 3; j++)\n"
+        "    }\n"
+        "}"
+    )
+
+
+def test_render_reduction_update():
+    a = UOp(
+        "BUFFER",
+        arg=ParamArg("a", "float", 3),
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    k = UOp(
+        "RANGE",
+        (
+            UOp("CONST", arg=3),
+        ),
+        arg="k",
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    a,
+                                    UOp("VAR", arg="k"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert render(update) == "acc[0] = (acc[0] + a[k]);"
+
+
+
+def test_render_full_reduction():
+    a = UOp(
+        "BUFFER",
+        arg=ParamArg("a", "float", 3),
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    init = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp("CONST", arg=0.0),
+        ),
+    )
+
+    loop = UOp(
+        "RANGE",
+        (
+            UOp("CONST", arg=3),
+        ),
+        arg="k",
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    a,
+                                    UOp("VAR", arg="k"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    end = UOp(
+        "END",
+        (
+            acc,
+            loop,
+        ),
+    )
+
+    code = "\n".join([
+        render(acc),
+        render(init),
+        render(loop),
+        "    " + render(update),
+        render(end),
+    ])
+
+    assert code == (
+        "float acc[1];\n"
+        "acc[0] = 0.0;\n"
+        "for (int k = 0; k < 3; k++)\n"
+        "    acc[0] = (acc[0] + a[k]);\n"
+        "}"
+    )
+
+
+def test_render_gemm_one_cell():
+    A = UOp(
+        "BUFFER",
+        arg=ParamArg("A", "float", 4),
+    )
+
+    B = UOp(
+        "BUFFER",
+        arg=ParamArg("B", "float", 4),
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    init = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp("CONST", arg=0.0),
+        ),
+    )
+
+    k = UOp(
+        "RANGE",
+        (
+            UOp("CONST", arg=2),
+        ),
+        arg="k",
+    )
+
+    a_index = UOp(
+        "ADD",
+        (
+            UOp("CONST", arg=0),
+            UOp("VAR", arg="k"),
+        ),
+    )
+
+    b_index = UOp(
+        "MUL",
+        (
+            UOp("VAR", arg="k"),
+            UOp("CONST", arg=2),
+        ),
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "MUL",
+                        (
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            A,
+                                            a_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            B,
+                                            b_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    end = UOp(
+        "END",
+        (
+            acc,
+            k,
+        ),
+    )
+
+    code = "\n".join([
+        render(acc),
+        render(init),
+        render(k),
+        "    " + render(update),
+        render(end),
+    ])
+
+    assert code == (
+        "float acc[1];\n"
+        "acc[0] = 0.0;\n"
+        "for (int k = 0; k < 2; k++)\n"
+        "    acc[0] = (acc[0] + (A[(0 + k)] * B[(k * 2)]));\n"
+        "}"
+    )
+
+
+def test_render_gemm_2x2():
+    A = UOp(
+        "BUFFER",
+        arg=ParamArg("A", "float", 4),
+    )
+
+    B = UOp(
+        "BUFFER",
+        arg=ParamArg("B", "float", 4),
+    )
+
+    C = UOp(
+        "BUFFER",
+        arg=ParamArg("C", "float", 4),
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    i = UOp(
+        "RANGE",
+        (UOp("CONST", arg=2),),
+        arg="i",
+    )
+
+    j = UOp(
+        "RANGE",
+        (UOp("CONST", arg=2),),
+        arg="j",
+    )
+
+    k = UOp(
+        "RANGE",
+        (UOp("CONST", arg=2),),
+        arg="k",
+    )
+
+    init = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp("CONST", arg=0.0),
+        ),
+    )
+
+    a_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp("VAR", arg="i"),
+                    UOp("CONST", arg=2),
+                ),
+            ),
+            UOp("VAR", arg="k"),
+        ),
+    )
+
+    b_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp("VAR", arg="k"),
+                    UOp("CONST", arg=2),
+                ),
+            ),
+            UOp("VAR", arg="j"),
+        ),
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "MUL",
+                        (
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            A,
+                                            a_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            B,
+                                            b_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    c_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp("VAR", arg="i"),
+                    UOp("CONST", arg=2),
+                ),
+            ),
+            UOp("VAR", arg="j"),
+        ),
+    )
+
+    store_c = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    C,
+                    c_index,
+                ),
+            ),
+            UOp(
+                "LOAD",
+                (
+                    UOp(
+                        "INDEX",
+                        (
+                            acc,
+                            UOp("CONST", arg=0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    end_k = UOp("END", (acc, k))
+    end_j = UOp("END", (C, j))
+    end_i = UOp("END", (C, i))
+
+    code = "\n".join([
+        render(acc),
+        render(i),
+        "    " + render(j),
+        "        " + render(init),
+        "        " + render(k),
+        "            " + render(update),
+        "        " + render(end_k),
+        "        " + render(store_c),
+        "    " + render(end_j),
+        render(end_i),
+    ])
+
+    assert code == (
+        "float acc[1];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "    for (int j = 0; j < 2; j++)\n"
+        "        acc[0] = 0.0;\n"
+        "        for (int k = 0; k < 2; k++)\n"
+        "            acc[0] = (acc[0] + (A[((i * 2) + k)] * B[((k * 2) + j)]));\n"
+        "        }\n"
+        "        C[((i * 2) + j)] = acc[0];\n"
+        "    }\n"
+        "}"
+    )
+
+
+def test_render_conv1d():
+    x = UOp(
+        "BUFFER",
+        arg=ParamArg("x", "float", 4),
+    )
+
+    w = UOp(
+        "BUFFER",
+        arg=ParamArg("w", "float", 3),
+    )
+
+    out = UOp(
+        "BUFFER",
+        arg=ParamArg("out", "float", 2),
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    i = UOp(
+        "RANGE",
+        (UOp("CONST", arg=2),),
+        arg="i",
+    )
+
+    k = UOp(
+        "RANGE",
+        (UOp("CONST", arg=3),),
+        arg="k",
+    )
+
+    init = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp("CONST", arg=0.0),
+        ),
+    )
+
+    x_index = UOp(
+        "ADD",
+        (
+            UOp("VAR", arg="i"),
+            UOp("VAR", arg="k"),
+        ),
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "MUL",
+                        (
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            x,
+                                            x_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            w,
+                                            UOp("VAR", arg="k"),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    store_out = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    out,
+                    UOp("VAR", arg="i"),
+                ),
+            ),
+            UOp(
+                "LOAD",
+                (
+                    UOp(
+                        "INDEX",
+                        (
+                            acc,
+                            UOp("CONST", arg=0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    end_k = UOp("END", (acc, k))
+    end_i = UOp("END", (out, i))
+
+    code = "\n".join([
+        render(acc),
+        render(i),
+        "    " + render(init),
+        "    " + render(k),
+        "        " + render(update),
+        "    " + render(end_k),
+        "    " + render(store_out),
+        render(end_i),
+    ])
+
+    assert code == (
+        "float acc[1];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "    acc[0] = 0.0;\n"
+        "    for (int k = 0; k < 3; k++)\n"
+        "        acc[0] = (acc[0] + (x[(i + k)] * w[k]));\n"
+        "    }\n"
+        "    out[i] = acc[0];\n"
+        "}"
+    )
+
+
+def test_render_conv2d():
+    inp = UOp(
+        "BUFFER",
+        arg=ParamArg("inp", "float", 9),   # 3x3
+    )
+
+    ker = UOp(
+        "BUFFER",
+        arg=ParamArg("ker", "float", 4),   # 2x2
+    )
+
+    out = UOp(
+        "BUFFER",
+        arg=ParamArg("out", "float", 4),   # 2x2 output
+    )
+
+    acc = UOp(
+        "ALLOC",
+        arg=ParamArg("acc", "float", 1),
+    )
+
+    y = UOp("RANGE", (UOp("CONST", arg=2),), arg="y")
+    x = UOp("RANGE", (UOp("CONST", arg=2),), arg="x")
+    ky = UOp("RANGE", (UOp("CONST", arg=2),), arg="ky")
+    kx = UOp("RANGE", (UOp("CONST", arg=2),), arg="kx")
+
+    init = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp("CONST", arg=0.0),
+        ),
+    )
+
+    input_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp(
+                        "ADD",
+                        (
+                            UOp("VAR", arg="y"),
+                            UOp("VAR", arg="ky"),
+                        ),
+                    ),
+                    UOp("CONST", arg=3),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp("VAR", arg="x"),
+                    UOp("VAR", arg="kx"),
+                ),
+            ),
+        ),
+    )
+
+    kernel_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp("VAR", arg="ky"),
+                    UOp("CONST", arg=2),
+                ),
+            ),
+            UOp("VAR", arg="kx"),
+        ),
+    )
+
+    update = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    acc,
+                    UOp("CONST", arg=0),
+                ),
+            ),
+            UOp(
+                "ADD",
+                (
+                    UOp(
+                        "LOAD",
+                        (
+                            UOp(
+                                "INDEX",
+                                (
+                                    acc,
+                                    UOp("CONST", arg=0),
+                                ),
+                            ),
+                        ),
+                    ),
+                    UOp(
+                        "MUL",
+                        (
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            inp,
+                                            input_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            UOp(
+                                "LOAD",
+                                (
+                                    UOp(
+                                        "INDEX",
+                                        (
+                                            ker,
+                                            kernel_index,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    output_index = UOp(
+        "ADD",
+        (
+            UOp(
+                "MUL",
+                (
+                    UOp("VAR", arg="y"),
+                    UOp("CONST", arg=2),
+                ),
+            ),
+            UOp("VAR", arg="x"),
+        ),
+    )
+
+    store_out = UOp(
+        "STORE",
+        (
+            UOp(
+                "INDEX",
+                (
+                    out,
+                    output_index,
+                ),
+            ),
+            UOp(
+                "LOAD",
+                (
+                    UOp(
+                        "INDEX",
+                        (
+                            acc,
+                            UOp("CONST", arg=0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    end_kx = UOp("END", (acc, kx))
+    end_ky = UOp("END", (acc, ky))
+    end_x = UOp("END", (out, x))
+    end_y = UOp("END", (out, y))
+
+    code = "\n".join([
+        render(acc),
+        render(y),
+        "    " + render(x),
+        "        " + render(init),
+        "        " + render(ky),
+        "            " + render(kx),
+        "                " + render(update),
+        "            " + render(end_kx),
+        "        " + render(end_ky),
+        "        " + render(store_out),
+        "    " + render(end_x),
+        render(end_y),
+    ])
+
+    assert code == (
+        "float acc[1];\n"
+        "for (int y = 0; y < 2; y++)\n"
+        "    for (int x = 0; x < 2; x++)\n"
+        "        acc[0] = 0.0;\n"
+        "        for (int ky = 0; ky < 2; ky++)\n"
+        "            for (int kx = 0; kx < 2; kx++)\n"
+        "                acc[0] = (acc[0] + (inp[(((y + ky) * 3) + (x + kx))] * ker[((ky * 2) + kx)]));\n"
+        "            }\n"
+        "        }\n"
+        "        out[((y * 2) + x)] = acc[0];\n"
+        "    }\n"
+        "}"
+    )
