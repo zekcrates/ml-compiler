@@ -11,7 +11,7 @@ class UOp:
 
     def __new__(cls, op,src=(), arg=None):
         src = tuple(src)
-        key = (op,src,arg)
+        key = (op,src,type(arg) , arg)
         if key in cls._cache:
             return cls._cache[key]
 
@@ -37,11 +37,12 @@ class UOp:
         if self.op in ("ADD", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
         if self.op == "PARAM": return self.arg.dtype 
         if self.op in ("BUFFER", "ALLOC") : return self.arg.dtype 
-        if self.op in ("INDEX" ,"LOAD", "STORE", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2") : return self.src[0].dtype 
+        if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK") : return self.src[0].dtype 
         if self.op == "VAR" : return "int"
         if self.op in ("CMPNE", "CMPLT"): return "bool"
         if self.op  == "CAST": return self.arg 
         if self.op == "LOG2":  return "float"
+        if self.op in ( "STORE", "LINEAR") : return "void"
 
     @property
     def shape(self):
@@ -54,7 +55,7 @@ class UOp:
         if self.op in ("BUFFER", "ALLOC"):
             return (self.arg.size, ) 
 
-        if self.op in  ( "INDEX","LOAD", "STORE", "VAR"):
+        if self.op in  ( "INDEX","LOAD", "STORE", "VAR", "LINEAR"):
             return ()
 
         if self.op == "RESHAPE":
@@ -110,7 +111,14 @@ class UOp:
                 new_shape[axis] = total 
 
             return tuple(new_shape)
-                
+
+        if self.op == "STACK":
+            old_shape = self.src[0].shape 
+            if not all(src.shape == old_shape for src in self.src):
+                raise ValueError("all STACK sources must have the same shape")
+            n = len(self.src)
+            new_shape =  (n,) + old_shape
+            return tuple(new_shape)
 
     @property
     def addrspace(self):
@@ -246,20 +254,17 @@ def eval_call_body(node, env):
         return eval_call_body(node.src[0], env) * eval_call_body(node.src[1], env)
 
     raise NotImplementedError(node.op)
-def ops(expr):
-    if expr.op == "CONST" or expr.op == "PARAM":
-        return []
+def toposort(expr):
+    seen = set() 
+    out = []
+    def walk(node):
+        if node in seen : return 
+        for child in node.src : walk(child)
+        seen.add(node)
+        out.append(node)
 
-
-    output = []
-
-    if isinstance(expr, UOp):
-        for child in expr.src:
-            output.extend(ops(child))
-
-        output.append(expr.op)
-
-    return output
+    walk(expr)
+    return tuple(out)
 
 
 def simplify(expr):
@@ -494,6 +499,24 @@ def render(expr, indexed=False):
         start = render(expr.src[0])
         end = render(expr.src[1])
         return f"for (int {expr.arg} = {start}; {expr.arg} < {end}; {expr.arg}++)"
+
+
+    if expr.op == "ALLOC":
+        name = expr.arg.name 
+        size = expr.arg.size 
+        ty = expr.arg.dtype 
+
+        return f"{ty} {name}[{size}];"
+
+    if expr.op == "AFTER":
+        store = render(expr.src[1])
+        buf = render(expr.src[0])
+
+        return f"{store}\n{buf}"
+
+    if expr.op == "LINEAR":
+        return "\n".join(render(x) for x in expr.src)
+
     left = render(expr.src[0], indexed=indexed)
     right = render(expr.src[1], indexed=indexed)
 
@@ -612,3 +635,7 @@ def render_function(name, body, params):
         + "\n"
         + "}\n"
     )
+
+
+def linearize(expr):
+    return UOp("LINEAR", toposort(expr))
