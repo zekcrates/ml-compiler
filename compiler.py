@@ -1,9 +1,23 @@
+import math
+import weakref 
 class Var:
     def __init__(self, name):
         self.name = name
 
 
 class UOp:
+
+    _cache = weakref.WeakValueDictionary()
+
+    def __new__(cls, op,src=(), arg=None):
+        src = tuple(src)
+        key = (op,src,arg)
+        if key in cls._cache:
+            return cls._cache[key]
+
+        obj = super().__new__(cls)
+        cls._cache[key] = obj 
+        return obj 
     def __init__(self, op, src=(), arg=None ):
         self.op = op
         self.src = tuple(src)
@@ -15,15 +29,20 @@ class UOp:
         if self.arg != other.arg : return False 
         if self.src != other.src : return False 
         return True 
-
+    def __hash__(self):
+        return hash((self.op, self.src, self.arg))
     @property
     def dtype(self):
         if self.op == "CONST": return type(self.arg).__name__
-        if self.op in ("ADD", "MUL") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
+        if self.op in ("ADD", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
         if self.op == "PARAM": return self.arg.dtype 
         if self.op in ("BUFFER", "ALLOC") : return self.arg.dtype 
-        if self.op in ("INDEX" ,"LOAD", "STORE") : return self.src[0].dtype 
+        if self.op in ("INDEX" ,"LOAD", "STORE", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2") : return self.src[0].dtype 
         if self.op == "VAR" : return "int"
+        if self.op in ("CMPNE", "CMPLT"): return "bool"
+        if self.op  == "CAST": return self.arg 
+        if self.op == "LOG2":  return "float"
+
     @property
     def shape(self):
         if self.op == "CONST": return ()
@@ -38,6 +57,61 @@ class UOp:
         if self.op in  ( "INDEX","LOAD", "STORE", "VAR"):
             return ()
 
+        if self.op == "RESHAPE":
+            old_shape = self.src[0].shape 
+            new_shape = self.arg 
+            old_size =1 
+            for x in old_shape:
+                old_size *= x 
+            new_size = 1 
+            for x in new_shape:
+                new_size *= x 
+            if new_size != old_size :
+                raise ValueError("reshape mismatch")
+
+            return new_shape
+
+        if self.op == "SHRINK":
+            output = []
+            old_shape = self.src[0].shape
+
+            if len(old_shape) != len(self.arg):
+                raise ValueError("axes dont match")
+
+            for axis,pair in enumerate(self.arg):
+                start, end = pair
+                size = old_shape[axis]
+
+
+                if start < 0 :
+                    raise ValueError("start out of bounds")
+
+                if start > end:
+                    raise ValueError("invalid range")
+
+                if end > size :
+                    raise ValueError("end out of bounds")
+
+                output.append(end-start)
+
+            return tuple(output)
+        
+
+        if self.op == "FLIP":
+            return self.src[0].shape
+
+        if self.op == "PAD":
+            old_shape = self.src[0].shape 
+            new_shape =  list(old_shape) 
+            for axis, pair in enumerate(self.arg):
+                left, right = pair 
+                size = old_shape[axis]
+                total = left + size + right
+                new_shape[axis] = total 
+
+            return tuple(new_shape)
+                
+
     @property
     def addrspace(self):
         if self.op in ("CONST", "PARAM", "ADD", "MUL", "VAR"):
@@ -49,10 +123,16 @@ class ParamArg:
         self.dtype = dtype 
         self.size = size 
 
+    def __eq__(self, other):
+        return (isinstance(other, ParamArg) and self.name == other.name and self.dtype == other.dtype and self.size == other.size)
+
+    def __hash__(self):
+        return hash((self.name, self.dtype, self.size))
 def run(expr):
     if expr.op == "CONST":
         return expr.arg 
-
+    if expr.op == "EXP2":
+        return 2 ** run(expr.src[0])
     if expr.op == "AFTER":
         a = expr.src[0]
         b = expr.src[1]
@@ -66,6 +146,8 @@ def run(expr):
     if expr.op == "MUL":
         a = run(expr.src[0])
         b = run(expr.src[1])
+        if isinstance(a, bool) and isinstance(b, bool):
+            return a and b 
         return a *b 
 
     if expr.op == "DIV":
@@ -83,6 +165,87 @@ def run(expr):
             return left 
         else:
             return right 
+
+    if expr.op == "NEG":
+        a = run(expr.src[0])
+        return -a 
+
+    if expr.op == "MAX":
+        a = run(expr.src[0])
+        b = run(expr.src[1])
+        if isinstance(a, bool) and isinstance(b, bool):
+            return a or b 
+        return max(a, b)
+
+    if expr.op == "CMPNE":
+        a = run(expr.src[0])
+        b = run(expr.src[1])
+        return not a == b 
+
+    if expr.op == "CMPLT":
+        a = run(expr.src[0])
+        b = run(expr.src[1])
+        return a < b 
+
+    if expr.op == "FLOORDIV":
+        a = run(expr.src[0])
+        b = run(expr.src[1])
+        return  a // b 
+    if expr.op == "FLOORMOD":
+        a =run(expr.src[0])
+        b = run(expr.src[1])
+        return a % b 
+
+    if expr.op == "CAST":
+        value = run(expr.src[0])
+        if expr.arg == "int": return int(value)
+        if expr.arg == "float": return float(value)
+        if expr.arg == "bool" : return bool(value)
+
+
+    if expr.op == "LOG2":
+        return math.log2(run(expr.src[0]))
+
+
+    if expr.op == "CALL":
+        body = expr.src[0]
+        args = expr.src[1:]
+
+        params = []
+
+        def collect(node):
+            if node.op == "PARAM":
+                if node.arg.name not in [p.arg.name for p in params]:
+                    params.append(node)
+                return
+
+            for child in node.src:
+                collect(child)
+
+        collect(body)
+
+        env = {
+            param.arg.name: run(arg)
+            for param, arg in zip(params, args)
+        }
+
+        return eval_call_body(body, env)
+
+
+def eval_call_body(node, env):
+    if node.op == "PARAM":
+        return env[node.arg.name]
+
+    if node.op == "CONST":
+        return node.arg
+
+    if node.op == "ADD":
+        return eval_call_body(node.src[0], env) + eval_call_body(node.src[1], env)
+
+    if node.op == "MUL":
+        return eval_call_body(node.src[0], env) * eval_call_body(node.src[1], env)
+
+    raise NotImplementedError(node.op)
 def ops(expr):
     if expr.op == "CONST" or expr.op == "PARAM":
         return []
@@ -144,15 +307,13 @@ def simplify(expr):
             return a 
         if a.op == "CONST" and b.op == "CONST":
             return UOp("CONST", arg=a.arg /b.arg )
-
+        return UOp("DIV", (a,b))
     if expr.op == "RECIP":
         a = simplify(expr.src[0])
-        if a.op == "CONST" and a.arg == 0 :
-            return a 
-
+        
         if a.op == "CONST"  :
             return UOp("CONST", arg= 1/a.arg)
-
+        return UOp("RECIP", (a,))
     if expr.op == "WHERE":
         cond = simplify(expr.src[0])
         a = simplify(expr.src[1])
@@ -161,6 +322,75 @@ def simplify(expr):
             return a if cond.arg else b
 
         return UOp("WHERE", (cond, a, b))
+
+    if expr.op == "NEG":
+        a = simplify(expr.src[0])
+        if a.op == "CONST":
+            return UOp("CONST", arg=-a.arg)
+        if a.op == "NEG":
+            return a.src[0]
+
+        return UOp("NEG", (a,))
+
+    if expr.op == "MAX":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        if a.op == "CONST" and b.op == "CONST":
+            return UOp("CONST", arg=max(a.arg,b.arg))
+
+        return UOp("MAX", (a,b))
+
+    if expr.op == "CMPNE":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        if a.op == "CONST" and b.op == "CONST":
+            return UOp("CONST", arg= not a==b)
+        return UOp("CMPNE", (a, b))
+
+    if expr.op == "CMPLT":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        if a.op == "CONST" and b.op == "CONST":
+            return UOp("CONST", arg= a.arg < b.arg )
+        return UOp("CMPLT", (a,b))
+
+
+    if expr.op == "FLOORDIV":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        if a.op == "CONST"  and b.op == "CONST":
+            return UOp("CONST", arg=a.arg // b.arg )
+        return UOp("FLOORDIV", (a,b))
+
+
+    if expr.op == "FLOORMOD":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        if a.op == "CONST" and b.op == "CONST":
+            return UOp("CONST", arg= a.arg % b.arg )
+        return UOp("FLOORMOD", (a,b))
+
+    if expr.op == "CAST":
+        a  = simplify(expr.src[0])
+        if a.op == "CONST":
+            if expr.arg == "int": return UOp("CONST",arg=int(a.arg))
+            if expr.arg == "float": return UOp("CONST", arg=float(a.arg))
+            if expr.arg == "bool" : return UOp("CONST", arg=bool(a.arg))
+
+        return UOp("CAST", (a,), arg=expr.arg)
+
+    if expr.op == "EXP2":
+        a =simplify(expr.src[0])
+        if a.op == "CONST":
+            return UOp("CONST", arg= 2** a.arg)
+        return UOp("EXP2", (a,))
+
+    if expr.op == "LOG2":
+        a = simplify(expr.src[0])
+        if a.op == "CONST":
+            return UOp("CONST", arg=math.log2(a.arg))
+        return UOp("LOG2", (a,))
+    
 def run_elementwise(expr, inputs):
 
     if expr.op == "PARAM":
@@ -211,12 +441,23 @@ def render(expr, indexed=False):
     if expr.op == "CONST":
         return str(expr.arg)
 
+    if expr.op == "EXP2":
+        return f"exp2({render(expr.src[0])})"
+    if expr.op == "LOG2":
+        return f"log2({render(expr.src[0])})"
     if expr.op == "VAR":
         return str(expr.arg)
     if expr.op == "PARAM":
-    
+        if indexed:
+            return f"{expr.arg.name}[i]"
         return expr.arg.name
 
+    if expr.op == "NEG":
+        a = render(expr.src[0])
+        return f"(-{a})"
+
+    if expr.op == "END":
+        return "}"
     if expr.op == "BUFFER":
         return str(expr.arg.name)
 
@@ -246,6 +487,13 @@ def render(expr, indexed=False):
     if expr.op == "CALL":
         args = ", ".join(render(x) for x in expr.src)
         return f"{expr.arg.name}({args})"
+
+    if expr.op == "CAST":
+        return f"(({expr.arg}){render(expr.src[0])})"
+    if expr.op == "RANGE":
+        start = render(expr.src[0])
+        end = render(expr.src[1])
+        return f"for (int {expr.arg} = {start}; {expr.arg} < {end}; {expr.arg}++)"
     left = render(expr.src[0], indexed=indexed)
     right = render(expr.src[1], indexed=indexed)
 
@@ -258,6 +506,32 @@ def render(expr, indexed=False):
     if expr.op == "DIV":
         return f"({left} / {right})"
 
+    if expr.op == "MAX":
+        left= render(expr.src[0])
+        right = render(expr.src[1])
+        return f"max({left}, {right})"
+
+    if expr.op == "CMPNE":
+        left = render(expr.src[0])
+        right = render(expr.src[1])
+        return f"({left} != {right})"
+
+    if expr.op == "CMPLT":
+        left = render(expr.src[0])
+        right = render(expr.src[1])
+        return f"({left} < {right})"
+
+
+    if expr.op == "FLOORDIV":
+        left = render(expr.src[0])
+        right = render(expr.src[1])
+        return f"({left} // {right})"
+
+    if expr.op == "FLOORMOD":
+        left = render(expr.src[0])
+        right = render(expr.src[1])
+        return f"({left} % {right})"
+    
 
 
 def compile_c(expr, n):
@@ -305,6 +579,11 @@ class CallArg:
     def __init__(self, name):
         self.name = name 
 
+    def __eq__(self, other):
+        return (isinstance(other, CallArg) and self.name == other.name )
+    def __hash__(self):
+        return hash(self.name)
+    
 
 
 def render_function(name, body, params):
