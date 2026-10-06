@@ -32,8 +32,9 @@ Conventions: `a`, `b`, `cond` are child UOps from `src`.
 | `BUFFER` | — | `ParamArg(name, dtype, size)` | Named global memory buffer. |
 | `ALLOC` | — | `ParamArg(name, dtype, size)` | Scratch buffer allocated in the kernel body. |
 | `ADD` | `(a, b)` | — | `a + b`. |
+| `SUB` | `(a, b)` | — | `a - b`. |
 | `MUL` | `(a, b)` | — | `a * b`. |
-| `DIV` | `(a, b)` | — | `a / b` (true division). |
+| `DIV` | `(a, b)` | — | `a / b`. |
 | `RECIP` | `(a,)` | — | `1.0 / a`. |
 | `NEG` | `(a,)` | — | `-a`. |
 | `MAX` | `(a, b)` | — | `max(a, b)`. |

@@ -31,24 +31,38 @@ class UOp:
         return True 
     def __hash__(self):
         return hash((self.op, self.src, self.arg))
+    def __repr__(self):
+        arg = f", arg={self.arg!r}" if self.arg is not None else ""
+        if not self.src:
+            return f"UOp({self.op}{arg})"
+        srcs = ", ".join(repr(s) for s in self.src)
+        return f"UOp({self.op}, src=({srcs}){arg})"
+
+    def tree(self, indent=0):
+        line = "  " * indent + self.op
+        if self.arg is not None:
+            line += f" {self.arg!r}"
+        for child in self.src:
+            line += "\n" + child.tree(indent + 1)
+        return line
     @property
     def dtype(self):
         if self.op == "CONST": return type(self.arg).__name__
-        if self.op in ("ADD", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
+        if self.op in ("ADD", "SUB", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
         if self.op == "PARAM": return self.arg.dtype 
-        if self.op in ("BUFFER", "ALLOC") : return self.arg.dtype 
-        if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK", "END") : return self.src[0].dtype 
+        if self.op in ("BUFFER", "ALLOC", "EXPAND") : return self.arg.dtype 
+        if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK", "END", "PERMUTE", "REDUCE") : return self.src[0].dtype 
         if self.op in ("VAR", "RANGE")  : return "int"
         if self.op in ("CMPNE", "CMPLT"): return "bool"
         if self.op  == "CAST": return self.arg 
         if self.op == "LOG2":  return "float"
         if self.op in ( "STORE", "LINEAR") : return "void"
-    
+
 
     @property
     def shape(self):
         if self.op == "CONST": return ()
-        if self.op in ("ADD", "MUL")  : 
+        if self.op in ("ADD", "SUB", "MUL")  : 
             if self.src[0].shape != self.src[1].shape :
                 raise ValueError("Shapes don't match")
             return self.src[0].shape 
@@ -123,6 +137,16 @@ class UOp:
 
         if self.op == "END":
             return self.src[0].shape 
+
+
+        if self.op == "EXPAND":
+            return self.arg 
+
+        if self.op == "PERMUTE":
+            return tuple(self.src[0].shape[i] for  i in self.arg )
+
+        if self.op == "REDUCE":
+            return tuple(size for axis,size in enumerate(self.src[0].shape) if axis not in self.arg )
     @property
     def addrspace(self):
         if self.op in ("CONST", "PARAM", "ADD", "MUL", "VAR"):
@@ -139,6 +163,8 @@ class ParamArg:
 
     def __hash__(self):
         return hash((self.name, self.dtype, self.size))
+    def __repr__(self):
+        return f"{self.name}: {self.dtype}" + (f"[{self.size}]" if self.size is not None else "")
 def run(expr):
     if expr.op == "CONST":
         return expr.arg 
@@ -153,6 +179,11 @@ def run(expr):
         a = run(expr.src[0])
         b = run(expr.src[1])    
         return a+b 
+
+    if expr.op == "SUB":
+        a = run(expr.src[0])
+        b = run(expr.src[1])
+        return a-b
 
     if expr.op == "MUL":
         a = run(expr.src[0])
@@ -288,6 +319,16 @@ def simplify(expr):
         if a.op == "CONST" and b.op == "CONST":
             return UOp("CONST", arg=a.arg + b.arg )
         return UOp("ADD", src=(a,b))
+    if expr.op == "SUB":
+        a = simplify(expr.src[0])
+        b = simplify(expr.src[1])
+        # x - 0 -> x
+        if b.op == "CONST" and b.arg == 0:
+            return a
+
+        if a.op == "CONST" and b.op == "CONST":
+            return UOp("CONST", arg=a.arg - b.arg)
+        return UOp("SUB", (a,b))
     if expr.op == "MUL":
         a = simplify(expr.src[0])
         b = simplify(expr.src[1])
@@ -529,6 +570,9 @@ def render(expr, indexed=False):
     if expr.op == "ADD":
         return f"({left} + {right})"
 
+    if expr.op == "SUB":
+        return f"({left} - {right})"
+
     if expr.op == "MUL":
         return f"({left} * {right})"
 
@@ -612,6 +656,8 @@ class CallArg:
         return (isinstance(other, CallArg) and self.name == other.name )
     def __hash__(self):
         return hash(self.name)
+    def __repr__(self):
+        return self.name
     
 
 
@@ -645,3 +691,93 @@ def render_function(name, body, params):
 
 def linearize(expr):
     return UOp("LINEAR", toposort(expr))
+
+
+def lower_indexed(expr, i):    
+    if expr.op == "PARAM":
+        pointer = UOp("INDEX", (expr, i))
+        return UOp("LOAD", (pointer,))
+
+    if expr.op in ("ADD", "SUB", "MUL"):
+        return UOp(expr.op, tuple(lower_indexed(s, i) for s in expr.src))
+
+    if expr.op == "PAD":
+        left, right = expr.arg[0]
+        left_const = UOp("CONST", arg=left)
+        in_padding = UOp("CMPLT", (i, left_const))
+        size = expr.src[0].shape[0]
+        right_const = UOp("CONST", arg=left + size)
+        in_padding_right = UOp("CMPLT", (i, right_const))
+        minus_left = UOp("CONST", arg=-left)
+        shifted_index = UOp("ADD", (i, minus_left))
+        value = lower_indexed(expr.src[0], shifted_index)   
+        zero = UOp("CONST", arg=0)
+        inner_result = UOp("WHERE", (in_padding_right, value, zero))
+        return UOp("WHERE", (in_padding, zero, inner_result))
+
+    if expr.op == "SHRINK":
+        left, right = expr.arg[0]
+        const = UOp("CONST", arg=left)
+        shifted_index = UOp("ADD", (i, const))
+        return lower_indexed(expr.src[0], shifted_index)    
+
+    if expr.op == "FLIP":
+        size = expr.src[0].shape[0]
+        const = UOp("CONST", arg=size - 1)
+        shifted_index = UOp("SUB", (const, i))
+        return lower_indexed(expr.src[0], shifted_index)   
+
+
+    if expr.op == "EXPAND":
+        return lower_indexed(expr.src[0], UOp("CONST", arg=0))
+
+
+    if expr.op == "REDUCE":
+        op,axis = expr.arg 
+        n = expr.src[0].shape[0]
+        allc = UOp("ALLOC", arg=ParamArg("acc", expr.src[0].dtype, 1))
+
+        zero_const = UOp("CONST", arg=0)
+        idx = UOp("INDEX", (allc,zero_const))
+        old_acc = UOp("LOAD", (idx, ))
+
+        if op == "ADD":
+            if expr.src[0].dtype == "float":
+                start_value = UOp("CONST", arg=0.0)
+            else:
+                start_value = UOp("CONST", arg=0)
+        elif op == "MAX":
+            zero_c2 = UOp("CONST", arg=0)
+            output = lower_indexed(expr.src[0], zero_c2 )
+            start_value = output 
+        init  = UOp("STORE", (idx, start_value))
+
+        k = UOp("VAR" , arg="k")
+        bound_const = UOp("CONST", arg=n)
+        loop = UOp("RANGE", (bound_const,), arg="k")
+        element =lower_indexed(expr.src[0], k )
+
+        if op == "ADD":
+            combine = UOp("ADD", (old_acc, element))
+        elif op == "MAX":
+            combine = UOp("MAX", (old_acc, element))
+
+        update = UOp("STORE", (idx, combine))
+        end = UOp("END", (allc, loop))
+        return UOp("LINEAR", (allc, init, loop, update, end))
+
+    return expr
+
+
+def lower(expr):                             
+    return lower_indexed(expr, UOp("VAR", arg="i"))
+
+def lower_program(expr):
+    n = expr.shape[0]
+    i = UOp("VAR", arg="i")
+    out = UOp("ALLOC", arg=ParamArg("out", "int", n))
+    value = lower(expr)
+    store = UOp("STORE", (UOp("INDEX", (out, i)), value))
+    loop = UOp("RANGE", (UOp("CONST", arg=n),), arg="i")
+    end = UOp("END", (out,loop))
+    return UOp("LINEAR", (out, loop, store, end))

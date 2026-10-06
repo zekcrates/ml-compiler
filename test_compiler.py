@@ -1808,3 +1808,137 @@ def test_render_conv2d():
         "    }\n"
         "}"
     )
+
+
+def _assert_pad_lowered(arg, expected):
+    a = P("a", "int", 5)
+    padded = UOp("PAD", (a,), arg=arg)
+    assert render(lower(padded)) == expected
+
+
+def test_lower_pad():
+    # formula: (i < left) ? 0 : (i < left + size) ? a[i - left] : 0
+    _assert_pad_lowered(((2, 0),), "((i < 2) ? 0 : ((i < 7) ? a[(i + -2)] : 0))")
+    _assert_pad_lowered(((2, 2),), "((i < 2) ? 0 : ((i < 7) ? a[(i + -2)] : 0))")
+    _assert_pad_lowered(((0, 2),), "((i < 0) ? 0 : ((i < 5) ? a[(i + 0)] : 0))")
+
+
+def test_lower_shrink():
+    a = P("a", "int", 10)
+
+    shrunk = UOp("SHRINK", (a,), arg=((2, 7),))
+
+    assert render(lower(shrunk)) == "a[(i + 2)]"
+
+    a = P("a", "int", 10)
+    shrunk = UOp("SHRINK", (a,), arg=((0, 10),))
+    assert render(lower(shrunk)) == "a[(i + 0)]"
+
+    a = P("a", "int", 10)
+    shrunk = UOp("SHRINK", (a,), arg=((4, 9),))
+    assert render(lower(shrunk)) == "a[(i + 4)]"
+
+    a = P("a", "int", 10)
+    b = P("b", "int", 10)
+    expr = UOp("ADD", (
+        UOp("SHRINK", (a,), arg=((2, 7),)),
+        UOp("SHRINK", (b,), arg=((1, 6),)),
+    ))
+    assert render(lower(expr)) == "(a[(i + 2)] + b[(i + 1)])"
+
+
+def test_lower_flip():
+    a = P("a", "int", 5)
+
+    flipped = UOp("FLIP", (a,))
+
+    assert render(lower(flipped)) == "a[(4 - i)]"
+
+
+       # the 2 must come from the input's shape, not be hardcoded
+    a = P("a", "int", 3)
+    flipped = UOp("FLIP", (a,))
+    assert render(lower(flipped)) == "a[(2 - i)]"
+
+    a = P("a", "int", 5)
+    b = P("b", "int", 10)
+    expr = UOp("ADD", (
+        UOp("FLIP", (a,)),
+        UOp("SHRINK", (b,), arg=((1, 6),)),
+    ))
+    assert render(lower(expr)) == "(a[(4 - i)] + b[(i + 1)])"
+
+
+def test_lower_expand():
+    a = P("a", "int", 1)                          # one-element input
+
+    expanded = UOp("EXPAND", (a,), arg=(10,))     # broadcast to 10 positions
+
+    assert render(lower(expanded)) == "a[0]"
+
+
+    a = P("a", "int", 1)
+    expanded = UOp("EXPAND", (a,), arg=(4,))
+    assert render(lower(expanded)) == "a[0]"
+
+def test_lower_program_elementwise():
+    a = P("a", "int", 5)
+    b = P("b", "int", 5)
+
+    expr = UOp("ADD", (a, b))
+
+    prog = lower_program(expr)
+
+    assert render(prog) == (
+        "int out[5];\n"
+        "for (int i = 0; i < 5; i++)\n"
+        "out[i] = (a[i] + b[i]);\n"
+        "}"
+    )
+
+
+
+
+def test_lower_reduce_sum():
+    a = P("a", "float", 5)
+    red = UOp("REDUCE", (a,), arg=("ADD" , 0))
+    lowered = lower(red)
+
+    assert render(lowered) == (
+        "float acc[1];\n"
+        "acc[0] = 0.0;\n"
+        "for (int k = 0; k < 5; k++)\n"
+        "acc[0] = (acc[0] + a[k]);\n"
+        "}"
+    )
+
+    a = P("a", "float", 5)
+
+    red = UOp("REDUCE", (a,), arg=("MAX", 0))
+
+    lowered = lower(red)
+
+    assert render(lowered) == (
+        "float acc[1];\n"
+        "acc[0] = a[0];\n"                    
+        "for (int k = 0; k < 5; k++)\n"
+        "acc[0] = max(acc[0], a[k]);\n"       
+        "}"
+    )
+
+
+def test_reduce_composes():
+    a = P("a", "int", 10)
+
+    shrunk = UOp("SHRINK", (a,), arg=((2, 7),))     
+    red = UOp("REDUCE", (shrunk,), arg=("ADD", 0))  
+
+    lowered = lower(red)
+
+    assert render(lowered) == (
+        "int acc[1];\n"
+        "acc[0] = 0;\n"
+        "for (int k = 0; k < 5; k++)\n"              
+        "acc[0] = (acc[0] + a[(k + 2)]);\n"          
+        "}"
+    )
