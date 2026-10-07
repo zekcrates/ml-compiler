@@ -715,7 +715,10 @@ def linearize(expr):
     return UOp("LINEAR", toposort(expr))
 
 
-def lower_indexed(expr, i):    
+def lower_indexed(expr, idxs):
+    if len(idxs) ==1 :
+        i, = idxs 
+
     if expr.op == "PARAM":
         pointer = UOp("INDEX", (expr, i))
         return UOp("LOAD", (pointer,))
@@ -744,11 +747,16 @@ def lower_indexed(expr, i):
         return lower_indexed(expr.src[0], shifted_index)    
 
     if expr.op == "FLIP":
-        size = expr.src[0].shape[0]
-        const = UOp("CONST", arg=size - 1)
-        shifted_index = UOp("SUB", (const, i))
-        return lower_indexed(expr.src[0], shifted_index)   
-
+        in_shape = expr.src[0].shape 
+        flip_set = expr.arg if expr.arg is not None else tuple(range(len(in_shape)))
+        in_idx = []
+        for a in  range(len(in_shape)):
+            if a in flip_set:
+                size_sub = UOp("CONST",arg=in_shape[a]-1)
+                in_idx.append(UOp("SUB", (size_sub, idxs[a])))
+            else:
+                in_idx.append(idxs[a])
+        return lower_indexed(expr.src[0], tuple(in_idx))
 
     if expr.op == "EXPAND":
         old_size = expr.src[0].shape[0]
@@ -795,18 +803,12 @@ def lower_indexed(expr, i):
 
 
     if expr.op == "PERMUTE":
-        old_shape = expr.src[0].shape 
-        axes = expr.arg 
-        var_i , var_j = i 
-        col_const = UOp("CONST", arg=old_shape[axes[0]])
-        mul_j = UOp("MUL", (var_j , col_const))
-        sum_i = UOp("ADD", (mul_j , var_i))
 
-        base = expr.src[0]
-        while base.op == "RESHAPE":
-            base = base.src[0]
-        shifted_index = UOp("INDEX",(base, sum_i) )
-        return UOp("LOAD", (shifted_index,))
+        in_idx = [None]  * len(expr.src[0].shape)
+        for k,a in enumerate(expr.arg):
+            in_idx[a]  = idxs[k]
+
+        return lower_indexed(expr.src[0], tuple(in_idx))
 
     if expr.op == "STACK":
         a_size = expr.src[0].shape[0] 
@@ -823,12 +825,22 @@ def lower_indexed(expr, i):
 
         whr = UOp("WHERE", (i_less_a,a_ld,b_ld))
         return whr 
-
+    if expr.op == "RESHAPE":
+        shape = expr.arg 
+        flat = idxs[-1]
+        stride = 1 
+        for a in reversed(range(len(shape)-1)):
+            stride *= shape[a+1]
+            row_const = UOp("CONST", arg=stride)
+            mul_i_row = UOp("MUL", (idxs[a], row_const))
+            flat  = UOp("ADD", (mul_i_row, flat))
+        ptr = UOp("INDEX", (expr.src[0], flat))
+        return UOp("LOAD", (ptr,))
     return expr
 
 
 def lower(expr):                             
-    return lower_indexed(expr, UOp("VAR", arg="i"))
+    return lower_indexed(expr, (UOp("VAR", arg="i"),))
 
 def lower_program(expr):
     n = expr.shape[0]
@@ -839,3 +851,6 @@ def lower_program(expr):
     loop = UOp("RANGE", (UOp("CONST", arg=n),), arg="i")
     end = UOp("END", (out,loop))
     return UOp("LINEAR", (out, loop, store, end))
+
+
+

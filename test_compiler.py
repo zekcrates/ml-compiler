@@ -2014,3 +2014,108 @@ def test_end_to_end_1d():
     lowered = lower(expr)
     actual = [eval_lowered_at(lowered, {"a": a_vals, "b": b_vals}, i) for i in range(n)]
     assert actual == expected
+
+
+def test_lower_reshape_1d():
+    a = P("a", "int", 5)
+    reshaped = UOp("RESHAPE", (a,), arg=(5,))       
+    assert render(lower(reshaped)) == "a[i]" 
+
+
+def test_lower_reshape_2d():
+    a = P("a", "int", 6)
+    reshaped = UOp("RESHAPE", (a,), arg=(2,3))
+    i,j = V("i"), V("j")
+    lowered = lower_indexed(reshaped, (i,j))
+    assert render(lowered) == "a[((i * 3) + j)]"
+
+def test_lower_reshape_3d():
+    a = P("a", "int", 24)
+    reshaped = UOp("RESHAPE", (a,), arg=(2, 3, 4))
+
+    i, j, k = V("i"), V("j"), V("k")
+    lowered = lower_indexed(reshaped, (i, j, k))
+    # slab i, row j, col k -> flat i*12 + j*4 + k
+    assert render(lowered) == "a[((i * 12) + ((j * 4) + k))]"
+
+def test_lower_reshape_4d():
+    a = P("a", "int", 120)
+    reshaped = UOp("RESHAPE", (a,), arg=(2, 3, 4, 5))
+
+    i, j, k, l = V("i"), V("j"), V("k"), V("l")
+    lowered = lower_indexed(reshaped, (i, j, k, l))
+    # strides: 60, 20, 5, 1 -> flat i*60 + j*20 + k*5 + l
+    assert render(lowered) == "a[((i * 60) + ((j * 20) + ((k * 5) + l)))]"
+
+
+def test_lower_permute_1d():
+    a = UOp("RESHAPE", (P("a", "int", 5),), arg=(5,))
+    permuted = UOp("PERMUTE", (a,), arg=(0,))
+    assert permuted.shape == (5,)
+
+    assert render(lower(permuted)) == "a[i]"        
+
+
+def test_lower_permute_2d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    permuted = UOp("PERMUTE", (a,), arg=(1, 0))
+    assert permuted.shape == (3, 2)
+
+    i, j = V("i"), V("j")
+    # out (i, j) -> in (j, i) -> flat j*3 + i
+    assert render(lower_indexed(permuted, (i, j))) == "a[((j * 3) + i)]"
+
+
+def test_lower_permute_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    permuted = UOp("PERMUTE", (a,), arg=(2, 0, 1))
+    # out axis k <- in axis 2, out axis i <- in axis 0, out axis j <- in axis 1
+    assert permuted.shape == (4, 2, 3)
+
+    i, j, k = V("i"), V("j"), V("k")
+    # out (i, j, k) -> in (j, k, i) -> strides of (2,3,4) are (12, 4, 1)
+    # flat = j*12 + k*4 + i
+    assert render(lower_indexed(permuted, (i, j, k))) == "a[((j * 12) + ((k * 4) + i))]"
+
+
+def test_lower_permute_4d():
+    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
+    permuted = UOp("PERMUTE", (a,), arg=(3, 1, 0, 2))
+    assert permuted.shape == (5, 3, 2, 4)
+
+    i, j, k, l = V("i"), V("j"), V("k"), V("l")
+    # out (i, j, k, l) -> in (k, j, l, i) -> strides (60, 20, 5, 1)
+    # flat = k*60 + j*20 + l*5 + i
+    assert render(lower_indexed(permuted, (i, j, k, l))) == "a[((k * 60) + ((j * 20) + ((l * 5) + i)))]"
+
+
+def test_lower_flip_2d_axis0():
+    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
+    flipped = UOp("FLIP", (a,), arg=(0,))          # rows reverse
+    assert flipped.shape == (3, 4)
+
+    i, j = V("i"), V("j")
+    # in tuple = ((2 - i), j) -> flat (2 - i)*4 + j
+    assert render(lower_indexed(flipped, (i, j))) == "a[(((2 - i) * 4) + j)]"
+
+
+def test_lower_flip_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    flipped = UOp("FLIP", (a,), arg=(0, 2))        # flip slab axis and col axis, middle untouched
+    assert flipped.shape == (2, 3, 4)
+
+    i, j, k = V("i"), V("j"), V("k")
+    # in tuple = ((1 - i), j, (3 - k)) -> flat (1-i)*12 + j*4 + (3-k)
+    assert render(lower_indexed(flipped, (i, j, k))) == "a[(((1 - i) * 12) + ((j * 4) + (3 - k)))]"
+
+
+def test_lower_flip_4d():
+    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
+    flipped = UOp("FLIP", (a,), arg=(1, 3))        # skip axis 0, flip 1, skip 2, flip 3
+    assert flipped.shape == (2, 3, 4, 5)
+
+    i, j, k, l = V("i"), V("j"), V("k"), V("l")
+    # in tuple = (i, (2 - j), k, (4 - l)) -> flat i*60 + (2-j)*20 + k*5 + (4-l)
+    assert render(lower_indexed(flipped, (i, j, k, l))) == "a[((i * 60) + (((2 - j) * 20) + ((k * 5) + (4 - l))))]"
+
+
