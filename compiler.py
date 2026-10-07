@@ -797,7 +797,7 @@ def lower_indexed(expr, i):
         b_const = UOp("CONST", arg=b_size)
         i_less_a = UOp("CMPLT", (i, a_const))
         i_fd_a = UOp("FLOORMOD", (i , a_const))
-        i_fd_b = UOp("FLOODMOD", (i, b_const))
+        i_fd_b = UOp("FLOORMOD", (i, b_const))
         a_idx = UOp("INDEX", (expr.src[0], i_fd_a))
         b_idx = UOp("INDEX",(expr.src[1], i_fd_b))
         a_ld = UOp("LOAD", (a_idx,))
