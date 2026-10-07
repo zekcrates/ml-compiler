@@ -63,6 +63,10 @@ class UOp:
     def shape(self):
         if self.op == "CONST": return ()
         if self.op in ("ADD", "SUB", "MUL")  : 
+            if self.src[0].shape == (1,) and self.src[1].shape != (1,):
+                return self.src[1].shape 
+            if self.src[0].shape != (1,) and self.src[1].shape == (1,):
+                return self.src[0].shape
             if self.src[0].shape != self.src[1].shape :
                 raise ValueError("Shapes don't match")
             return self.src[0].shape 
@@ -729,6 +733,11 @@ def lower_indexed(expr, i):
 
 
     if expr.op == "EXPAND":
+        old_size = expr.src[0].shape[0]
+        current_size = expr.arg[0]
+        if old_size == current_size:
+            return lower_indexed(expr.src[0], i)
+
         return lower_indexed(expr.src[0], UOp("CONST", arg=0))
 
 
@@ -765,6 +774,37 @@ def lower_indexed(expr, i):
         update = UOp("STORE", (idx, combine))
         end = UOp("END", (allc, loop))
         return UOp("LINEAR", (allc, init, loop, update, end))
+
+
+    if expr.op == "PERMUTE":
+        old_shape = expr.src[0].shape 
+        axes = expr.arg 
+        var_i , var_j = i 
+        col_const = UOp("CONST", arg=old_shape[axes[0]])
+        mul_j = UOp("MUL", (var_j , col_const))
+        sum_i = UOp("ADD", (mul_j , var_i))
+
+        base = expr.src[0]
+        while base.op == "RESHAPE":
+            base = base.src[0]
+        shifted_index = UOp("INDEX",(base, sum_i) )
+        return UOp("LOAD", (shifted_index,))
+
+    if expr.op == "STACK":
+        a_size = expr.src[0].shape[0] 
+        b_size = expr.src[1].shape[0]
+        a_const = UOp("CONST", arg=a_size)
+        b_const = UOp("CONST", arg=b_size)
+        i_less_a = UOp("CMPLT", (i, a_const))
+        i_fd_a = UOp("FLOORMOD", (i , a_const))
+        i_fd_b = UOp("FLOODMOD", (i, b_const))
+        a_idx = UOp("INDEX", (expr.src[0], i_fd_a))
+        b_idx = UOp("INDEX",(expr.src[1], i_fd_b))
+        a_ld = UOp("LOAD", (a_idx,))
+        b_ld = UOp("LOAD", (b_idx,))
+
+        whr = UOp("WHERE", (i_less_a,a_ld,b_ld))
+        return whr 
 
     return expr
 

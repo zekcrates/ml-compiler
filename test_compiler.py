@@ -1870,9 +1870,9 @@ def test_lower_flip():
 
 
 def test_lower_expand():
-    a = P("a", "int", 1)                          # one-element input
+    a = P("a", "int", 1)                          
 
-    expanded = UOp("EXPAND", (a,), arg=(10,))     # broadcast to 10 positions
+    expanded = UOp("EXPAND", (a,), arg=(10,))     
 
     assert render(lower(expanded)) == "a[0]"
 
@@ -1942,3 +1942,36 @@ def test_reduce_composes():
         "acc[0] = (acc[0] + a[(k + 2)]);\n"          
         "}"
     )
+
+def test_lower_permute():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    permuted = UOp("PERMUTE", (a, ), arg=(1,0))
+    assert permuted.shape == (3,2)
+
+    i, j = V("i"), V("j")
+    lowered = lower_indexed(permuted, (i, j ))
+    assert render(lowered) == "a[((j * 3) + i)]"
+
+def test_lower_expand_identity():
+    a = P("a", "int", 3)
+    expanded = UOp("EXPAND", (a, ), arg=(3,))
+    assert render(lower(expanded)) == "a[i]"
+
+
+def test_broadcast_shape_propagation():
+    a = P("a", "int", 5)
+    b = P("b", "int", 1)
+
+    expr = UOp("ADD", (a, b))
+    assert expr.shape == (5,)
+
+    expr2 = UOp("MUL", (b, a))          
+    assert expr2.shape == (5,)
+
+
+
+def test_lower_stack():
+    a = P("a","int", 3  )
+    b = P("b", "int", 3)
+    stacked = UOp("STACK", (a,b))
+    assert render(lower(stacked)) == "((i < 3) ? a[(i % 3)] : b[(i % 3)])"
