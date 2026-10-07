@@ -453,6 +453,24 @@ def run_elementwise(expr, inputs):
 
     if expr.op == "CONST":
         return expr.arg 
+
+    if expr.op in  ("FLIP", "PAD", "SHRINK", "EXPAND", "RESHAPE"):
+        data = run_elementwise(expr.src[0], inputs)
+        if expr.op == "FLIP":
+            return data[::-1]
+        elif expr.op == "PAD":
+            ((l, r),) = expr.arg
+            return [0] * l + data + [0]* r 
+        if expr.op == "SHRINK":
+            ((l, r),) = expr.arg
+
+            return data[l:r]
+        if expr.op == "EXPAND":
+            return data * (expr.arg[0] // len(data)) if len(data) == 1 else list(data)
+
+        if expr.op == "RESHAPE":
+            return list(data)
+
     op,src = expr.op, expr.src 
     left = src[0]
     right = src[1]

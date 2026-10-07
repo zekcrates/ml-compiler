@@ -1975,3 +1975,42 @@ def test_lower_stack():
     b = P("b", "int", 3)
     stacked = UOp("STACK", (a,b))
     assert render(lower(stacked)) == "((i < 3) ? a[(i % 3)] : b[(i % 3)])"
+
+
+
+def eval_lowered_at(expr, arrays, i):
+    if expr.op == "VAR" and expr.arg == "i":
+        return i
+    if expr.op == "INDEX":
+        base = expr.src[0]
+        idx = eval_lowered_at(expr.src[1], arrays, i)
+        return arrays[base.arg.name][idx]
+    if expr.op == "LOAD":
+        return eval_lowered_at(expr.src[0], arrays, i)
+    if expr.op == "WHERE":                     
+        cond = eval_lowered_at(expr.src[0], arrays, i)
+        taken = expr.src[1] if cond else expr.src[2]
+        return eval_lowered_at(taken, arrays, i)
+    const = lambda v: UOp("CONST", arg=v)
+    rebuilt = UOp(expr.op, tuple(const(eval_lowered_at(s, arrays, i)) for s in expr.src), arg=expr.arg)
+    return run(rebuilt)
+def test_end_to_end_1d():
+    a_vals = [1, 2, 3, 4, 5]
+    b_vals = [10, 10, 10, 10, 10]
+
+    a = P("a", "int", 5)
+    b = P("b", "int", 5)
+
+    expr = UOp("ADD", (
+        UOp("PAD", (UOp("FLIP", (a,)),), arg=((1, 0),)),
+        b,
+    ))
+
+    n = 5
+
+    expected = run_elementwise(expr, {"a": a_vals, "b": b_vals})
+    assert expected == [10, 15, 14, 13, 12]   
+
+    lowered = lower(expr)
+    actual = [eval_lowered_at(lowered, {"a": a_vals, "b": b_vals}, i) for i in range(n)]
+    assert actual == expected
