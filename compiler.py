@@ -566,7 +566,7 @@ def render(expr, indexed=False):
     if expr.op == "CAST":
         return f"(({expr.arg}){render(expr.src[0])})"
     if expr.op == "RANGE":
-        end = render(expr.src[0])
+        end = render(expr.src[-1])
         return f"for (int {expr.arg} = 0; {expr.arg} < {end}; {expr.arg}++)"
 
 
@@ -724,28 +724,41 @@ def lower_indexed(expr, idxs):
         return UOp("LOAD", (pointer,))
 
     if expr.op in ("ADD", "SUB", "MUL"):
-        return UOp(expr.op, tuple(lower_indexed(s, i) for s in expr.src))
+        return UOp(expr.op, tuple(lower_indexed(s, (i,)) for s in expr.src))
 
     if expr.op == "PAD":
-        left, right = expr.arg[0]
-        left_const = UOp("CONST", arg=left)
-        in_padding = UOp("CMPLT", (i, left_const))
-        size = expr.src[0].shape[0]
-        right_const = UOp("CONST", arg=left + size)
-        in_padding_right = UOp("CMPLT", (i, right_const))
-        minus_left = UOp("CONST", arg=-left)
-        shifted_index = UOp("ADD", (i, minus_left))
-        value = lower_indexed(expr.src[0], shifted_index)   
-        zero = UOp("CONST", arg=0)
-        inner_result = UOp("WHERE", (in_padding_right, value, zero))
-        return UOp("WHERE", (in_padding, zero, inner_result))
+        in_idx = []
+        for a , (l,r) in enumerate(expr.arg):
+            if l==0: in_idx.append(idxs[a])
+            else: 
+                in_idx.append(UOp("ADD", (idxs[a], UOp("CONST", arg=-l))))
 
-    if expr.op == "SHRINK":
-        left, right = expr.arg[0]
-        const = UOp("CONST", arg=left)
-        shifted_index = UOp("ADD", (i, const))
-        return lower_indexed(expr.src[0], shifted_index)    
+        data = lower_indexed(expr.src[0], tuple(in_idx))
+        result = data 
+        for a, (l,r) in reversed(list(enumerate(expr.arg))): 
+            l_const = UOp("CONST", arg=l)
+            zero = UOp("CONST", arg=0)
+            if r > 0 :
+                size = expr.src[0].shape[a]
+                limit = UOp("ADD", (l_const, UOp("CONST", arg=size)))  
+                cond = UOp("CMPLT", (idxs[a], limit))           
+                result = UOp("WHERE", (cond, result, zero))
+            if l> 0 :
+                cond = UOp("CMPLT", (idxs[a], l_const))
+                result =  UOp("WHERE", (cond, zero, result))
+        return result 
+    if expr.op == "SHRINK": 
+        in_shape = expr.src[0].shape 
+        in_idx = []
+        for idx, (l, r)  in enumerate(expr.arg) :
+            if l ==0 :
+                in_idx.append(idxs[idx])
+            else :
 
+                const = UOp("CONST", arg=l)
+                in_idx.append(UOp("ADD", (idxs[idx], const)))
+
+        return lower_indexed(expr.src[0], tuple(in_idx))
     if expr.op == "FLIP":
         in_shape = expr.src[0].shape 
         flip_set = expr.arg if expr.arg is not None else tuple(range(len(in_shape)))
@@ -759,12 +772,15 @@ def lower_indexed(expr, idxs):
         return lower_indexed(expr.src[0], tuple(in_idx))
 
     if expr.op == "EXPAND":
-        old_size = expr.src[0].shape[0]
-        current_size = expr.arg[0]
-        if old_size == current_size:
-            return lower_indexed(expr.src[0], i)
+        in_shape = expr.src[0].shape 
+        out_shape = expr.arg 
+        in_idx  = []
+        for a in range(len(out_shape)):
+            if in_shape[a]== 1 : in_idx.append(UOp("CONST", arg=0))
+            else: 
+                in_idx.append(idxs[a])
+        return lower_indexed(expr.src[0], tuple(in_idx))
 
-        return lower_indexed(expr.src[0], UOp("CONST", arg=0))
 
 
     if expr.op == "REDUCE":
@@ -783,14 +799,14 @@ def lower_indexed(expr, idxs):
                 start_value = UOp("CONST", arg=0)
         elif op == "MAX":
             zero_c2 = UOp("CONST", arg=0)
-            output = lower_indexed(expr.src[0], zero_c2 )
+            output = lower_indexed(expr.src[0], (zero_c2, ))
             start_value = output 
         init  = UOp("STORE", (idx, start_value))
 
         k = UOp("VAR" , arg="k")
         bound_const = UOp("CONST", arg=n)
         loop = UOp("RANGE", (bound_const,), arg="k")
-        element =lower_indexed(expr.src[0], k )
+        element =lower_indexed(expr.src[0], (k, ) )
 
         if op == "ADD":
             combine = UOp("ADD", (old_acc, element))

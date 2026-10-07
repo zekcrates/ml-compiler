@@ -1818,9 +1818,9 @@ def _assert_pad_lowered(arg, expected):
 
 def test_lower_pad():
     # formula: (i < left) ? 0 : (i < left + size) ? a[i - left] : 0
-    _assert_pad_lowered(((2, 0),), "((i < 2) ? 0 : ((i < 7) ? a[(i + -2)] : 0))")
-    _assert_pad_lowered(((2, 2),), "((i < 2) ? 0 : ((i < 7) ? a[(i + -2)] : 0))")
-    _assert_pad_lowered(((0, 2),), "((i < 0) ? 0 : ((i < 5) ? a[(i + 0)] : 0))")
+    _assert_pad_lowered(((2, 0),), "((i < 2) ? 0 : a[(i + -2)])")
+    _assert_pad_lowered(((2, 2),), "((i < 2) ? 0 : ((i < (2 + 5)) ? a[(i + -2)] : 0))")
+    _assert_pad_lowered(((0, 2),), "((i < (0 + 5)) ? a[i] : 0)")
 
 
 def test_lower_shrink():
@@ -1832,7 +1832,7 @@ def test_lower_shrink():
 
     a = P("a", "int", 10)
     shrunk = UOp("SHRINK", (a,), arg=((0, 10),))
-    assert render(lower(shrunk)) == "a[(i + 0)]"
+    assert render(lower(shrunk)) == "a[i]"
 
     a = P("a", "int", 10)
     shrunk = UOp("SHRINK", (a,), arg=((4, 9),))
@@ -2091,7 +2091,7 @@ def test_lower_permute_4d():
 
 def test_lower_flip_2d_axis0():
     a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    flipped = UOp("FLIP", (a,), arg=(0,))          # rows reverse
+    flipped = UOp("FLIP", (a,), arg=(0,))          
     assert flipped.shape == (3, 4)
 
     i, j = V("i"), V("j")
@@ -2101,7 +2101,7 @@ def test_lower_flip_2d_axis0():
 
 def test_lower_flip_3d():
     a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    flipped = UOp("FLIP", (a,), arg=(0, 2))        # flip slab axis and col axis, middle untouched
+    flipped = UOp("FLIP", (a,), arg=(0, 2))        
     assert flipped.shape == (2, 3, 4)
 
     i, j, k = V("i"), V("j"), V("k")
@@ -2111,11 +2111,97 @@ def test_lower_flip_3d():
 
 def test_lower_flip_4d():
     a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
-    flipped = UOp("FLIP", (a,), arg=(1, 3))        # skip axis 0, flip 1, skip 2, flip 3
+    flipped = UOp("FLIP", (a,), arg=(1, 3))      
     assert flipped.shape == (2, 3, 4, 5)
 
     i, j, k, l = V("i"), V("j"), V("k"), V("l")
     # in tuple = (i, (2 - j), k, (4 - l)) -> flat i*60 + (2-j)*20 + k*5 + (4-l)
     assert render(lower_indexed(flipped, (i, j, k, l))) == "a[((i * 60) + (((2 - j) * 20) + ((k * 5) + (4 - l))))]"
+
+
+def test_lower_shrink_2d_axis0():
+    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
+    shrunk = UOp("SHRINK", (a,), arg=((1, 3), (0, 4)))   
+    assert shrunk.shape == (2, 4)
+
+    i, j = V("i"), V("j")
+    # in tuple = (i + 1, j) -> flat (i + 1)*4 + j
+    assert render(lower_indexed(shrunk, (i, j))) == "a[(((i + 1) * 4) + j)]"
+
+
+def test_lower_shrink_2d_axis1():
+    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
+    shrunk = UOp("SHRINK", (a,), arg=((0, 3), (2, 4)))  
+    assert shrunk.shape == (3, 2)
+
+    i, j = V("i"), V("j")
+    # in tuple = (i, j + 2) -> flat i*4 + (j + 2)
+    assert render(lower_indexed(shrunk, (i, j))) == "a[((i * 4) + (j + 2))]"
+
+
+def test_lower_shrink_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    shrunk = UOp("SHRINK", (a,), arg=((1, 2), (0, 3), (2, 4)))
+    # out shape: (1, 3, 2)
+    assert shrunk.shape == (1, 3, 2)
+
+    i, j, k = V("i"), V("j"), V("k")
+    # in tuple = (i + 1, j, k + 2) -> flat (i+1)*12 + j*4 + (k+2)
+    assert render(lower_indexed(shrunk, (i, j, k))) == "a[(((i + 1) * 12) + ((j * 4) + (k + 2)))]"
+
+
+def test_lower_shrink_4d():
+    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
+    shrunk = UOp("SHRINK", (a,), arg=((0, 2), (1, 3), (0, 4), (3, 5)))
+    # out shape: (2, 2, 4, 2)
+    assert shrunk.shape == (2, 2, 4, 2)
+
+    i, j, k, l = V("i"), V("j"), V("k"), V("l")
+    # in tuple = (i, j + 1, k, l + 3) -> flat i*60 + (j+1)*20 + k*5 + (l+3)
+    assert render(lower_indexed(shrunk, (i, j, k, l))) == "a[((i * 60) + (((j + 1) * 20) + ((k * 5) + (l + 3))))]"
+
+
+
+def test_lower_pad_2d_axis0():
+    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
+    padded = UOp("PAD", (a,), arg=((2, 0), (0, 0)))     
+    assert padded.shape == (5, 4)
+
+    i, j = V("i"), V("j")
+    assert render(lower_indexed(padded, (i, j))) == (
+        "((i < 2) ? 0 : a[(((i + -2) * 4) + j)])"
+    )
+
+def test_lower_pad_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    padded = UOp("PAD", (a,), arg=((1, 1), (0, 0), (0, 2)))
+    # out shape: (4, 3, 6)
+    assert padded.shape == (4, 3, 6)
+
+    i, j, k = V("i"), V("j"), V("k")
+    assert render(lower_indexed(padded, (i, j, k))) == (
+        "((i < 1) ? 0 : ((i < (1 + 2)) ? ((k < (0 + 4)) ? a[(((i + -1) * 12) + ((j * 4) + k))] : 0) : 0))"
+    )
+
+
+def test_lower_pad_4d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    padded = UOp("PAD", (a,), arg=((0, 0), (2, 1), (0, 0)))
+    # out shape: (2, 6, 4)
+    assert padded.shape == (2, 6, 4)
+
+    i, j, k = V("i"), V("j"), V("k")
+    assert render(lower_indexed(padded, (i, j, k))) == (
+        "((j < 2) ? 0 : ((j < (2 + 3)) ? a[((i * 12) + (((j + -2) * 4) + k))] : 0))"
+    )
+
+
+
+def test_lower_expand_2d():
+    a = UOp("RESHAPE", (P("a", "int", 3),), arg=(3, 1))
+    expanded = UOp("EXPAND", (a,), arg=(3,4))
+    assert expanded.shape == (3,4)
+    i, j = V("i"), V("j")
+    assert render(lower_indexed(expanded, (i, j))) == "a[((i * 1) + 0)]"
 
 
