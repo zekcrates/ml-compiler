@@ -50,7 +50,8 @@ class UOp:
         if self.op == "CONST": return type(self.arg).__name__
         if self.op in ("ADD", "SUB", "MUL", "MAX", "FLOORDIV", "FLOORMOD") : return promote_dtype(self.src[0].dtype, self.src[1].dtype)
         if self.op == "PARAM": return self.arg.dtype 
-        if self.op in ("BUFFER", "ALLOC", "EXPAND") : return self.arg.dtype 
+        if self.op == "EXPAND": return self.src[0].dtype
+        if self.op in ("BUFFER", "ALLOC") : return self.arg.dtype 
         if self.op in ("INDEX" ,"LOAD", "RESHAPE", "SHRINK", "FLIP", "PAD", "NEG", "EXP2", "LOG2", "STACK", "END", "PERMUTE", "REDUCE") : return self.src[0].dtype 
         if self.op in ("VAR", "RANGE")  : return "int"
         if self.op in ("CMPNE", "CMPLT"): return "bool"
@@ -63,13 +64,20 @@ class UOp:
     def shape(self):
         if self.op == "CONST": return ()
         if self.op in ("ADD", "SUB", "MUL")  : 
-            if self.src[0].shape == (1,) and self.src[1].shape != (1,):
-                return self.src[1].shape 
-            if self.src[0].shape != (1,) and self.src[1].shape == (1,):
-                return self.src[0].shape
-            if self.src[0].shape != self.src[1].shape :
+            sa, sb = self.src[0].shape, self.src[1].shape
+            if len(sa) != len(sb):
                 raise ValueError("Shapes don't match")
-            return self.src[0].shape 
+            out = []
+            for x, y in zip(sa, sb):
+                if x == y:
+                    out.append(x)
+                elif y == 1:
+                    out.append(x)
+                elif x == 1:
+                    out.append(y)
+                else:
+                    raise ValueError("Shapes don't match")
+            return tuple(out)
         if self.op == "PARAM": return (self.arg.size,) 
         if self.op in ("BUFFER", "ALLOC"):
             return (self.arg.size, ) 
@@ -724,7 +732,7 @@ def lower_indexed(expr, idxs):
         return UOp("LOAD", (pointer,))
 
     if expr.op in ("ADD", "SUB", "MUL"):
-        return UOp(expr.op, tuple(lower_indexed(s, (i,)) for s in expr.src))
+        return UOp(expr.op, tuple(lower_indexed(s, idxs) for s in expr.src))
 
     if expr.op == "PAD":
         in_idx = []
@@ -850,7 +858,10 @@ def lower_indexed(expr, idxs):
             row_const = UOp("CONST", arg=stride)
             mul_i_row = UOp("MUL", (idxs[a], row_const))
             flat  = UOp("ADD", (mul_i_row, flat))
-        ptr = UOp("INDEX", (expr.src[0], flat))
+        base = expr.src[0]
+        while base.op == "RESHAPE":     
+            base = base.src[0]
+        ptr = UOp("INDEX", (base, flat))
         return UOp("LOAD", (ptr,))
     return expr
 
@@ -858,15 +869,141 @@ def lower_indexed(expr, idxs):
 def lower(expr):                             
     return lower_indexed(expr, (UOp("VAR", arg="i"),))
 
+def lower_program_reduce(expr):
+    op, axis = expr.arg
+    in_shape = expr.src[0].shape
+    out_shape = expr.shape
+    dtype = expr.src[0].dtype
+
+    names = ["i", "j", "k", "l"][:len(out_shape)]
+    idxs = tuple(UOp("VAR", arg=name) for name in names)
+
+    n = 1
+    for s in out_shape:
+        n *= s
+    out = UOp("ALLOC", arg=ParamArg("out", dtype, n))
+
+    kname = "k" if "k" not in names else "m"
+    k = UOp("VAR", arg=kname)
+    in_idxs = idxs[:axis] + (k,) + idxs[axis:]
+    element = lower_indexed(expr.src[0], in_idxs)
+
+    acc = UOp("ALLOC", arg=ParamArg("acc", dtype, 1))
+    acc_ptr = UOp("INDEX", (acc, UOp("CONST", arg=0)))
+    old_acc = UOp("LOAD", (acc_ptr,))
+
+    if op == "ADD":
+        init_val = UOp("CONST", arg=0.0 if dtype == "float" else 0)
+        combine = UOp("ADD", (old_acc, element))
+    elif op == "MAX":
+        first = lower_indexed(expr.src[0], tuple(UOp("CONST", arg=0) for _ in in_idxs))
+        init_val = first
+        combine = UOp("MAX", (old_acc, element))
+    else:
+        raise ValueError(f"unsupported reduce op {op}")
+
+    init = UOp("STORE", (acc_ptr, init_val))
+    loop = UOp("RANGE", (UOp("CONST", arg=in_shape[axis]),), arg=kname)
+    update = UOp("STORE", (acc_ptr, combine))
+    end = UOp("END", (acc, loop))
+    store_val = UOp("LOAD", (UOp("INDEX", (acc, UOp("CONST", arg=0))),))
+
+    # store into out at the flattened output index
+    flat = idxs[-1]
+    stride = 1
+    for a in reversed(range(len(out_shape) - 1)):
+        stride *= out_shape[a + 1]
+        flat = UOp("ADD", (UOp("MUL", (idxs[a], UOp("CONST", arg=stride))), flat))
+    store = UOp("STORE", (UOp("INDEX", (out, flat)), store_val))
+
+    lines = [out]
+    ranges = []
+    for name, size in zip(names, out_shape):
+        loop_o = UOp("RANGE", (UOp("CONST", arg=size),), arg=name)
+        ranges.append(loop_o)
+        lines.append(loop_o)
+    lines.extend([acc, init, loop, update, end, store])
+    for loop_o in reversed(ranges):
+        lines.append(UOp("END", (out, loop_o)))
+    return UOp("LINEAR", tuple(lines))
+
+
 def lower_program(expr):
-    n = expr.shape[0]
-    i = UOp("VAR", arg="i")
+    if expr.op == "REDUCE":
+        return lower_program_reduce(expr)
+    shape = expr.shape
+
+    names = ["i", "j", "k", "l"][:len(shape)]
+    idxs = tuple(UOp("VAR", arg=name) for name in names)
+
+    n = 1
+    for s in shape:
+        n *= s
     out = UOp("ALLOC", arg=ParamArg("out", "int", n))
-    value = lower(expr)
-    store = UOp("STORE", (UOp("INDEX", (out, i)), value))
-    loop = UOp("RANGE", (UOp("CONST", arg=n),), arg="i")
-    end = UOp("END", (out,loop))
-    return UOp("LINEAR", (out, loop, store, end))
+
+    value = lower_indexed(expr, idxs)
+
+    flat = idxs[-1]
+    stride = 1
+    for a in reversed(range(len(shape) - 1)):
+        stride *= shape[a + 1]
+        flat = UOp("ADD", (UOp("MUL", (idxs[a], UOp("CONST", arg=stride))), flat))
+    store = UOp("STORE", (UOp("INDEX", (out, flat)), value))
+
+    lines = [out]
+    ranges = []
+    for name, idx, size in zip(names, idxs, shape):
+        loop = UOp("RANGE", (UOp("CONST", arg=size),), arg=name)
+        ranges.append(loop)
+        lines.append(loop)
+    lines.append(store)
+    for loop in reversed(ranges):
+        lines.append(UOp("END", (out, loop)))
+    return UOp("LINEAR", tuple(lines))
+
+def matmul(A, B):
+    M, K = A.shape
+    K2, N = B.shape
+    if K2 != K:
+        raise ValueError("matmul: inner dimensions don't match")
+
+    # A3[i,j,k] = A[i,k] : (M,K) -> (M,1,K) -> (M,N,K)
+    a3 = UOp("EXPAND", (UOp("RESHAPE", (A,), arg=(M, 1, K)),), arg=(M, N, K))
+    # B3[i,j,k] = B[k,j] : (K,N) -> (1,N,K) -> permute axes -> (M,N,K) via expand
+    bt = UOp("PERMUTE", (UOp("RESHAPE", (B,), arg=(1, N, K)),), arg=(0, 2, 1))
+    b3 = UOp("EXPAND", (bt,), arg=(M, N, K))
+
+    return UOp("REDUCE", (mul(a3, b3),), arg=("ADD", 2))
 
 
+def broadcast(a,b):
+    sa,sb = a.shape , b.shape 
+    if len(sa) != len(sb):
+        raise ValueError("broadcast: rank mismatch")
 
+    out = []
+    for x,y in zip(sa,sb):
+        if x ==y :
+            out.append(x)
+        elif x==1 :
+            out.append(y)
+        elif y == 1:
+            out.append(x)
+        else :
+            raise ValueError(f"broadcast mismatch: {sa} vs {sb}")
+
+    out_shape = tuple(out)
+    if sa != out_shape:
+        a = UOp("EXPAND", (a,), arg=out_shape)
+    if sb != out_shape:
+        b = UOp("EXPAND", (b,), arg=out_shape)
+    return a, b
+
+def add(a, b):
+    return UOp("ADD", broadcast(a, b))
+
+def sub(a, b):
+    return UOp("SUB", broadcast(a, b))
+
+def mul(a, b):
+    return UOp("MUL", broadcast(a, b))

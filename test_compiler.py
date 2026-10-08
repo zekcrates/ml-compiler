@@ -2205,3 +2205,154 @@ def test_lower_expand_2d():
     assert render(lower_indexed(expanded, (i, j))) == "a[((i * 1) + 0)]"
 
 
+def test_lower_expand_3d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3, 1))
+    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4))     
+    assert expanded.shape == (2, 3, 4)
+
+    i, j, k = V("i"), V("j"), V("k")
+    # in tuple = (i, j, 0) -> strides of (2,3,1) are (3, 1, 1)
+    # flat = i*3 + j*1 + 0
+    assert render(lower_indexed(expanded, (i, j, k))) == "a[((i * 3) + ((j * 1) + 0))]"
+
+
+def test_lower_expand_3d_middle():
+    a = UOp("RESHAPE", (P("a", "int", 8),), arg=(2, 1, 4))
+    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4))     # broadcast the MIDDLE axis
+    assert expanded.shape == (2, 3, 4)
+
+    i, j, k = V("i"), V("j"), V("k")
+    # in tuple = (i, 0, k) -> flat i*12 + 0*4 + k
+    assert render(lower_indexed(expanded, (i, j, k))) == "a[((i * 4) + ((0 * 4) + k))]"
+
+
+def test_lower_expand_4d():
+    a = UOp("RESHAPE", (P("a", "int", 8),), arg=(2, 1, 4, 1))
+    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4, 5))  # two broadcast axes: 1 and 3
+    assert expanded.shape == (2, 3, 4, 5)
+
+    i, j, k, l = V("i"), V("j"), V("k"), V("l")
+    # in tuple = (i, 0, k, 0) -> strides (60, 20, 5, 1)
+    # flat = i*60 + 0*20 + k*5 + 0
+    assert render(lower_indexed(expanded, (i, j, k, l))) == "a[((i * 4) + ((0 * 4) + ((k * 1) + 0)))]"
+
+
+def test_broadcast_lowered():
+    a = P("a", "int", 5)
+    b = P("b", "int", 1)
+    expr = UOp("ADD", broadcast(a, b))
+    assert render(lower(expr)) == "(a[i] + b[0])"
+
+
+def test_broadcast_2d():
+    a = UOp("RESHAPE", (P("a", "int", 2),), arg=(2, 1))
+    b = UOp("RESHAPE", (P("b", "int", 3),), arg=(1, 3))
+    assert UOp("ADD", broadcast(a, b)).shape == (2, 3)
+    assert UOp("ADD", (a, b)).shape == (2, 3)
+
+
+def test_broadcast_mismatch_2d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    b = UOp("RESHAPE", (P("b", "int", 4),), arg=(2, 2))
+    with pytest.raises(ValueError):
+        _ = UOp("ADD", (a, b)).shape
+
+
+
+def test_lower_program_2d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    b = UOp("RESHAPE", (P("b", "int", 6),), arg=(2, 3))
+    expr = add(a, b)
+
+    prog = lower_program(expr)
+
+    assert render(prog) == (
+        "int out[6];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "for (int j = 0; j < 3; j++)\n"
+        "out[((i * 3) + j)] = (a[((i * 3) + j)] + b[((i * 3) + j)]);\n"
+        "}\n"
+        "}"
+    )
+
+def test_lower_program_2d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    b = UOp("RESHAPE", (P("b", "int", 6),), arg=(2, 3))
+    expr = add(a, b)
+
+    prog = lower_program(expr)
+
+    assert render(prog) == (
+        "int out[6];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "for (int j = 0; j < 3; j++)\n"
+        "out[((i * 3) + j)] = (a[((i * 3) + j)] + b[((i * 3) + j)]);\n"
+        "}\n"
+        "}"
+    )
+
+
+def test_lower_program_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    b = UOp("RESHAPE", (P("b", "int", 24),), arg=(2, 3, 4))
+    expr = add(a, b)
+
+    prog = lower_program(expr)
+
+    assert render(prog) == (
+        "int out[24];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "for (int j = 0; j < 3; j++)\n"
+        "for (int k = 0; k < 4; k++)\n"
+        "out[((i * 12) + ((j * 4) + k))] = (a[((i * 12) + ((j * 4) + k))] + b[((i * 12) + ((j * 4) + k))]);\n"
+        "}\n"
+        "}\n"
+        "}"
+    )
+
+
+def test_lower_program_4d():
+    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
+    b = UOp("RESHAPE", (P("b", "int", 120),), arg=(2, 3, 4, 5))
+    expr = add(a, b)
+
+    prog = lower_program(expr)
+
+    assert render(prog) == (
+        "int out[120];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "for (int j = 0; j < 3; j++)\n"
+        "for (int k = 0; k < 4; k++)\n"
+        "for (int l = 0; l < 5; l++)\n"
+        "out[((i * 60) + ((j * 20) + ((k * 5) + l)))] = (a[((i * 60) + ((j * 20) + ((k * 5) + l)))] + b[((i * 60) + ((j * 20) + ((k * 5) + l)))]);\n"
+        "}\n"
+        "}\n"
+        "}\n"
+        "}"
+    )
+
+
+def test_matmul_2x2_lowered():
+    A = UOp("RESHAPE", (P("A", "float", 4),), arg=(2, 2))
+    B = UOp("RESHAPE", (P("B", "float", 4),), arg=(2, 2))
+
+    C = matmul(A, B)
+    assert C.shape == (2, 2)
+
+    prog = lower_program(C)
+
+    # semantic match with the hand-written test_render_gemm_2x2:
+    # acc[0] = (acc[0] + (A[i*2+k] * B[k*2+j])) inside i/j loops
+    assert render(prog) == (
+        "float out[4];\n"
+        "for (int i = 0; i < 2; i++)\n"
+        "for (int j = 0; j < 2; j++)\n"
+        "float acc[1];\n"
+        "acc[0] = 0.0;\n"
+        "for (int k = 0; k < 2; k++)\n"
+        "acc[0] = (acc[0] + (A[((i * 2) + ((0 * 2) + k))] * B[((0 * 4) + ((k * 2) + j))]));\n"
+        "}\n"
+        "out[((i * 2) + j)] = acc[0];\n"
+        "}\n"
+        "}"
+    )
