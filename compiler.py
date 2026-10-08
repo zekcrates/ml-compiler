@@ -85,6 +85,9 @@ class UOp:
         if self.op in  ( "INDEX","LOAD", "STORE", "VAR", "LINEAR", "RANGE"):
             return ()
 
+        if self.op == "NEG":
+            return self.src[0].shape
+
         if self.op == "RESHAPE":
             old_shape = self.src[0].shape 
             new_shape = self.arg 
@@ -731,6 +734,10 @@ def lower_indexed(expr, idxs):
         pointer = UOp("INDEX", (expr, i))
         return UOp("LOAD", (pointer,))
 
+    if expr.op == "NEG":
+        child = lower_indexed(expr.src[0], idxs)
+        return UOp("NEG", (child,))
+
     if expr.op in ("ADD", "SUB", "MUL"):
         return UOp(expr.op, tuple(lower_indexed(s, idxs) for s in expr.src))
 
@@ -1007,3 +1014,34 @@ def sub(a, b):
 
 def mul(a, b):
     return UOp("MUL", broadcast(a, b))
+
+
+
+def rangeify(expr):
+    shape = expr.shape 
+
+    names = ["i", "j", "k", "l"][:len(shape)]
+    idxs = tuple(UOp("VAR", arg=name) for name in names ) 
+    ranges = tuple(
+        UOp("RANGE", (UOp("CONST", arg=size),), arg=name)
+            for name, size in zip(names, shape)
+        )
+
+    body = lower_indexed(expr, idxs)
+    return ranges, body
+
+def schedule(ranges,body):
+    loop = ranges[0]
+    size = loop.src[0].arg 
+    index = UOp("VAR", arg=loop.arg)
+    out = UOp(
+        "ALLOC", 
+        arg=ParamArg("out", body.dtype, size), 
+    )
+    output_ptr = UOp("INDEX", (out, index))
+    store = UOp("STORE", (output_ptr, body))
+    end = UOp("END", (out, loop))
+    return out, loop, store, end 
+
+
+    

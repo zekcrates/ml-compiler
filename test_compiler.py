@@ -2356,3 +2356,285 @@ def test_matmul_2x2_lowered():
         "}\n"
         "}"
     )
+
+
+
+def test_rangeify_test_param():
+    a = P("a", "int", 3)
+    ranges,body  = rangeify(a)
+
+    assert len(ranges) ==1 
+    assert ranges[0].op == "RANGE"
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[i]"
+
+
+def test_schedule_rangeified_param():
+    a = P("a", "int", 3)
+    ranges, body = rangeify(a)
+
+    scheduled = schedule(ranges, body)
+    out, loop, store, end = scheduled
+
+    assert out.op == "ALLOC"
+    assert out.arg == ParamArg("out", "int", 3)
+    assert loop is ranges[0]
+
+    assert store.op == "STORE"
+    pointer, value = store.src
+    assert pointer.op == "INDEX"
+    assert pointer.src == (out, V("i"))
+    assert value is body
+
+    assert end.op == "END"
+    assert end.src == (out, loop)
+def test_rangeify_neg():
+    a = P("a", "int", 3)
+    expr = UOp("NEG", (a,))
+    ranges,body = rangeify(expr)
+    assert len(ranges) == 1
+    assert ranges[0].op == "RANGE"
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+
+    assert body.op == "NEG"
+    assert render(body) == "(-a[i])"
+
+
+def test_schedule_neg():
+    a  = P("a","int", 3)
+    expr =UOp("NEG", (a,))
+    ranges,body = rangeify(expr)
+    scheduled = schedule(ranges, body)
+    out,loop, store, end = scheduled
+    assert out.op == "ALLOC"
+    assert out.arg == ParamArg("out", "int", 3)
+
+    assert loop is ranges[0]
+
+    assert store.op == "STORE"
+
+    pointer, value = store.src
+
+    assert pointer.op == "INDEX"
+    assert pointer.src == (out, V("i"))
+    assert value is body
+
+    assert end.op == "END"
+    assert end.src == (out, loop)
+
+
+def test_rangeify_reshape():
+    a = P("a", "int", 6)
+    expr = UOp("RESHAPE", (a,), arg=(2,3))
+    ranges,body = rangeify(expr)
+    assert len(ranges) == 2
+
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[((i * 3) + j)]"
+
+
+def test_rangeify_permute():
+    a = P("a", "int", 6)
+    reshaped = UOp("RESHAPE", (a,), arg=(2,3))
+    expr = UOp("PERMUTE", (reshaped, ), arg=(1,0))
+    ranges,body = rangeify(expr)
+    assert len(ranges) == 2
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (3, 2)
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[((j * 3) + i)]"
+
+
+def test_rangeify_expand():
+    a  = P("a", "int", 1)
+    expr = UOp("EXPAND", (a,), arg=(3,))
+    ranges,body = rangeify(expr)
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[0]"
+
+
+def test_rangeify_flip():
+    a = P("a", "int", 3)
+    expr = UOp("FLIP", (a,))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[(2 - i)]"
+
+def test_rangeify_shrink():
+    a = P("a", "int", 5)
+    expr = UOp("SHRINK", (a,), arg=((2, 5),))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+
+    assert body.op == "LOAD"
+    assert render(body) == "a[(i + 2)]"
+
+
+def test_rangeify_add():
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    expr = UOp("ADD", (a, b))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+    assert body.op == "ADD"
+    assert render(body) == "(a[i] + b[i])"
+
+
+def test_rangeify_pad():
+    a = P("a", "int", 5)
+    expr = UOp("PAD", (a,), arg=((1, 0),))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 6
+    assert body.op == "WHERE"
+    assert render(body) == "((i < 1) ? 0 : a[(i + -1)])"
+
+
+def test_rangeify_reshape_3d():
+    a = P("a", "int", 24)
+    expr = UOp("RESHAPE", (a,), arg=(2, 3, 4))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 3
+    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3, 4)
+    assert body.op == "LOAD"
+    assert render(body) == "a[((i * 12) + ((j * 4) + k))]"
+
+
+def test_rangeify_permute_3d():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    expr = UOp("PERMUTE", (a,), arg=(2, 0, 1))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 3
+    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (4, 2, 3)
+    assert body.op == "LOAD"
+    assert render(body) == "a[((j * 12) + ((k * 4) + i))]"
+
+
+def test_rangeify_sub():
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    expr = UOp("SUB", (a, b))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+    assert body.op == "SUB"
+    assert render(body) == "(a[i] - b[i])"
+
+
+def test_rangeify_mul():
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    expr = UOp("MUL", (a, b))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+    assert body.op == "MUL"
+    assert render(body) == "(a[i] * b[i])"
+
+
+def test_rangeify_expand_2d():
+    a = UOp("RESHAPE", (P("a", "int", 3),), arg=(1, 3))
+    expr = UOp("EXPAND", (a,), arg=(2, 3))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
+    assert body.op == "LOAD"
+    assert render(body) == "a[((0 * 3) + j)]"
+
+
+def test_rangeify_flip_2d():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    expr = UOp("FLIP", (a,), arg=(0, 1))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
+    assert body.op == "LOAD"
+    assert render(body) == "a[(((1 - i) * 3) + (2 - j))]"
+
+
+def test_rangeify_shrink_2d():
+    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
+    expr = UOp("SHRINK", (a,), arg=((1, 3), (0, 4)))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 4)
+    assert body.op == "LOAD"
+    assert render(body) == "a[(((i + 1) * 4) + j)]"
+
+
+def test_rangeify_composed_views():
+    a = P("a", "int", 12)
+
+    reshaped = UOp("RESHAPE", (a,), arg=(3, 4))
+    permuted = UOp("PERMUTE", (reshaped,), arg=(1, 0))
+    expr = UOp("FLIP", (permuted,), arg=(0,))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j")
+    assert tuple(run(r.src[0]) for r in ranges) == (4, 3)
+    assert body.op == "LOAD"
+    assert render(body) == "a[((j * 4) + (3 - i))]"
+
+
+def test_rangeify_elementwise_view():
+    a = P("a", "int", 1)
+    b = P("b", "int", 3)
+
+    expanded = UOp("EXPAND", (a,), arg=(3,))
+    expr = UOp("ADD", (expanded, b))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].arg == "i"
+    assert run(ranges[0].src[0]) == 3
+    assert body.op == "ADD"
+    assert render(body) == "(a[0] + b[i])"
