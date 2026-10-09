@@ -2386,3 +2386,64 @@ def test_rangeify_reduce_over_shrink():
     expr = UOp("REDUCE", (shrunk,), arg=("ADD", 0))
 
     _assert_rangeified(expr, ("k",), (5,), "REDUCE", "a[(k + 2)]", ("ADD", 0))
+
+
+@pytest.mark.parametrize(
+    "op, expected",
+    [
+        ("DIV", "(a[i] / b[i])"),
+        ("MAX", "max(a[i], b[i])"),
+        ("CMPNE", "(a[i] != b[i])"),
+        ("CMPLT", "(a[i] < b[i])"),
+        ("FLOORDIV", "(a[i] // b[i])"),
+        ("FLOORMOD", "(a[i] % b[i])"),
+    ],
+)
+def test_lower_indexed_binary_ops(op, expected):
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+
+    expr = UOp(op, (a, b))
+    lowered = lower_indexed(expr, (V("i"),))
+
+    assert render(lowered) == expected
+
+
+
+@pytest.mark.parametrize(
+    "expr, expected",
+    [
+        (
+            UOp("RECIP", (P("a", "float", 3),)),
+            "(1.0 / a[i])",
+        ),
+        (
+            UOp("EXP2", (P("a", "float", 3),)),
+            "exp2(a[i])",
+        ),
+        (
+            UOp("LOG2", (P("a", "float", 3),)),
+            "log2(a[i])",
+        ),
+        (
+            UOp("CAST", (P("a", "int", 3),), arg="float"),
+            "((float)a[i])",
+        ),
+    ],
+)
+def test_lower_indexed_unary_ops(expr, expected):
+    lowered = lower_indexed(expr, (V("i"),))
+
+    assert render(lowered) == expected
+
+
+
+def test_lower_indexed_where():
+    cond = P("cond", "bool", 3)
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+
+    expr = UOp("WHERE", (cond, a, b))
+    lowered = lower_indexed(expr, (V("i"),))
+
+    assert render(lowered) == "(cond[i] ? a[i] : b[i])"

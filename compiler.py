@@ -738,9 +738,17 @@ def lower_indexed(expr, idxs):
         child = lower_indexed(expr.src[0], idxs)
         return UOp("NEG", (child,))
 
-    if expr.op in ("ADD", "SUB", "MUL"):
+    if expr.op in ("ADD", "SUB", "MUL", "DIV", "MAX", "CMPNE", "CMPLT", "FLOORDIV", "FLOORMOD"):
         return UOp(expr.op, tuple(lower_indexed(s, idxs) for s in expr.src))
 
+    if expr.op in ("RECIP", "EXP2", "LOG2", "CAST"):
+        return UOp(expr.op, (lower_indexed(expr.src[0], idxs),), arg=expr.arg)
+
+    if expr.op == "WHERE":
+        return UOp(
+            "WHERE",
+            tuple(lower_indexed(src, idxs) for src in expr.src)
+        )
     if expr.op == "PAD":
         in_idx = []
         for a , (l,r) in enumerate(expr.arg):
@@ -1069,5 +1077,4 @@ def schedule(ranges,body):
     return out, loop, store, end 
 
 
-    
     
