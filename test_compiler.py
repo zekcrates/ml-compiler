@@ -1999,10 +1999,15 @@ def test_where_shape_propagation():
 
 
 def test_lower_stack():
-    a = P("a","int", 3  )
+    a = P("a", "int", 3)
     b = P("b", "int", 3)
-    stacked = UOp("STACK", (a,b))
-    assert render(lower(stacked)) == "((i < 3) ? a[(i % 3)] : b[(i % 3)])"
+    stacked = UOp("STACK", (a, b))
+
+    assert stacked.shape == (2, 3)
+
+    lowered = lower_indexed(stacked, (V("i"), V("j")))
+
+    assert render(lowered) == "((i < 1) ? a[j] : b[j])"
 
 
 
@@ -2568,4 +2573,48 @@ def test_lower_stack_three_inputs():
     assert render(lowered) == (
         "((i < 1) ? a[j] : "
         "((i < 2) ? b[j] : c[j]))"
+    )
+
+
+def test_lower_stack_2d():
+    a = UOp(
+        "RESHAPE",
+        (P("a", "int", 6),),
+        arg=(2, 3),
+    )
+    b = UOp(
+        "RESHAPE",
+        (P("b", "int", 6),),
+        arg=(2, 3),
+    )
+
+    expr = UOp("STACK", (a, b))
+
+    assert expr.shape == (2, 2, 3)
+
+    lowered = lower_indexed(
+        expr,
+        (V("i"), V("j"), V("k")),
+    )
+
+    assert render(lowered) == (
+        "((i < 1) ? "
+        "a[((j * 3) + k)] : "
+        "b[((j * 3) + k)])"
+    )
+
+
+def test_rangeify_stack_three_inputs():
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    c = P("c", "int", 3)
+
+    expr = UOp("STACK", (a, b, c))
+
+    _assert_rangeified(
+        expr,
+        ("i", "j"),
+        (3, 3),
+        "WHERE",
+        "((i < 1) ? a[j] : ((i < 2) ? b[j] : c[j]))",
     )
