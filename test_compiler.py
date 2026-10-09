@@ -2246,185 +2246,72 @@ def test_schedule_rangeified_rank1(expr_factory):
 
 
 def test_rangeify_reshape():
-    a = P("a", "int", 6)
-    expr = UOp("RESHAPE", (a,), arg=(2,3))
-    ranges,body = rangeify(expr)
-    assert len(ranges) == 2
-
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
-
-    assert body.op == "LOAD"
-    assert render(body) == "a[((i * 3) + j)]"
+    expr = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    _assert_rangeified(expr, ("i", "j"), (2, 3), "LOAD", "a[((i * 3) + j)]")
 
 
 def test_rangeify_permute():
-    a = P("a", "int", 6)
-    reshaped = UOp("RESHAPE", (a,), arg=(2,3))
-    expr = UOp("PERMUTE", (reshaped, ), arg=(1,0))
-    ranges,body = rangeify(expr)
-    assert len(ranges) == 2
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (3, 2)
-
-    assert body.op == "LOAD"
-    assert render(body) == "a[((j * 3) + i)]"
+    expr = UOp("PERMUTE", (_tensor("a", (2, 3)),), arg=(1, 0))
+    _assert_rangeified(expr, ("i", "j"), (3, 2), "LOAD", "a[((j * 3) + i)]")
 
 
 def test_rangeify_expand():
-    a  = P("a", "int", 1)
-    expr = UOp("EXPAND", (a,), arg=(3,))
-    ranges,body = rangeify(expr)
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-
-    assert body.op == "LOAD"
-    assert render(body) == "a[0]"
+    expr = UOp("EXPAND", (P("a", "int", 1),), arg=(3,))
+    _assert_rangeified(expr, ("i",), (3,), "LOAD", "a[0]")
 
 
 def test_rangeify_flip():
-    a = P("a", "int", 3)
-    expr = UOp("FLIP", (a,))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-
-    assert body.op == "LOAD"
-    assert render(body) == "a[(2 - i)]"
+    expr = UOp("FLIP", (P("a", "int", 3),))
+    _assert_rangeified(expr, ("i",), (3,), "LOAD", "a[(2 - i)]")
 
 def test_rangeify_shrink():
-    a = P("a", "int", 5)
-    expr = UOp("SHRINK", (a,), arg=((2, 5),))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-
-    assert body.op == "LOAD"
-    assert render(body) == "a[(i + 2)]"
+    expr = UOp("SHRINK", (P("a", "int", 5),), arg=((2, 5),))
+    _assert_rangeified(expr, ("i",), (3,), "LOAD", "a[(i + 2)]")
 
 
 def test_rangeify_add():
-    a = P("a", "int", 3)
-    b = P("b", "int", 3)
-    expr = UOp("ADD", (a, b))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-    assert body.op == "ADD"
-    assert render(body) == "(a[i] + b[i])"
+    expr = UOp("ADD", (P("a", "int", 3), P("b", "int", 3)))
+    _assert_rangeified(expr, ("i",), (3,), "ADD", "(a[i] + b[i])")
 
 
 def test_rangeify_pad():
-    a = P("a", "int", 5)
-    expr = UOp("PAD", (a,), arg=((1, 0),))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 6
-    assert body.op == "WHERE"
-    assert render(body) == "((i < 1) ? 0 : a[(i + -1)])"
+    expr = UOp("PAD", (P("a", "int", 5),), arg=((1, 0),))
+    _assert_rangeified(expr, ("i",), (6,), "WHERE", "((i < 1) ? 0 : a[(i + -1)])")
 
 
 def test_rangeify_reshape_3d():
-    a = P("a", "int", 24)
-    expr = UOp("RESHAPE", (a,), arg=(2, 3, 4))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 3
-    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3, 4)
-    assert body.op == "LOAD"
-    assert render(body) == "a[((i * 12) + ((j * 4) + k))]"
+    expr = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    _assert_rangeified(expr, ("i", "j", "k"), (2, 3, 4), "LOAD", "a[((i * 12) + ((j * 4) + k))]")
 
 
 def test_rangeify_permute_3d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    expr = UOp("PERMUTE", (a,), arg=(2, 0, 1))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 3
-    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (4, 2, 3)
-    assert body.op == "LOAD"
-    assert render(body) == "a[((j * 12) + ((k * 4) + i))]"
+    expr = UOp("PERMUTE", (_tensor("a", (2, 3, 4)),), arg=(2, 0, 1))
+    _assert_rangeified(expr, ("i", "j", "k"), (4, 2, 3), "LOAD", "a[((j * 12) + ((k * 4) + i))]")
 
 
 def test_rangeify_sub():
-    a = P("a", "int", 3)
-    b = P("b", "int", 3)
-    expr = UOp("SUB", (a, b))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-    assert body.op == "SUB"
-    assert render(body) == "(a[i] - b[i])"
+    expr = UOp("SUB", (P("a", "int", 3), P("b", "int", 3)))
+    _assert_rangeified(expr, ("i",), (3,), "SUB", "(a[i] - b[i])")
 
 
 def test_rangeify_mul():
-    a = P("a", "int", 3)
-    b = P("b", "int", 3)
-    expr = UOp("MUL", (a, b))
-
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-    assert body.op == "MUL"
-    assert render(body) == "(a[i] * b[i])"
+    expr = UOp("MUL", (P("a", "int", 3), P("b", "int", 3)))
+    _assert_rangeified(expr, ("i",), (3,), "MUL", "(a[i] * b[i])")
 
 
 def test_rangeify_expand_2d():
-    a = UOp("RESHAPE", (P("a", "int", 3),), arg=(1, 3))
-    expr = UOp("EXPAND", (a,), arg=(2, 3))
-
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
-    assert body.op == "LOAD"
-    assert render(body) == "a[((0 * 3) + j)]"
+    expr = UOp("EXPAND", (_tensor("a", (1, 3)),), arg=(2, 3))
+    _assert_rangeified(expr, ("i", "j"), (2, 3), "LOAD", "a[((0 * 3) + j)]")
 
 
 def test_rangeify_flip_2d():
-    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
-    expr = UOp("FLIP", (a,), arg=(0, 1))
-
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
-    assert body.op == "LOAD"
-    assert render(body) == "a[(((1 - i) * 3) + (2 - j))]"
+    expr = UOp("FLIP", (_tensor("a", (2, 3)),), arg=(0, 1))
+    _assert_rangeified(expr, ("i", "j"), (2, 3), "LOAD", "a[(((1 - i) * 3) + (2 - j))]")
 
 
 def test_rangeify_shrink_2d():
-    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    expr = UOp("SHRINK", (a,), arg=((1, 3), (0, 4)))
-
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 4)
-    assert body.op == "LOAD"
-    assert render(body) == "a[(((i + 1) * 4) + j)]"
+    expr = UOp("SHRINK", (_tensor("a", (3, 4)),), arg=((1, 3), (0, 4)))
+    _assert_rangeified(expr, ("i", "j"), (2, 4), "LOAD", "a[(((i + 1) * 4) + j)]")
 
 
 def test_rangeify_composed_views():
@@ -2434,12 +2321,7 @@ def test_rangeify_composed_views():
     permuted = UOp("PERMUTE", (reshaped,), arg=(1, 0))
     expr = UOp("FLIP", (permuted,), arg=(0,))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j")
-    assert tuple(run(r.src[0]) for r in ranges) == (4, 3)
-    assert body.op == "LOAD"
-    assert render(body) == "a[((j * 4) + (3 - i))]"
+    _assert_rangeified(expr, ("i", "j"), (4, 3), "LOAD", "a[((j * 4) + (3 - i))]")
 
 
 def test_rangeify_elementwise_view():
@@ -2449,13 +2331,7 @@ def test_rangeify_elementwise_view():
     expanded = UOp("EXPAND", (a,), arg=(3,))
     expr = UOp("ADD", (expanded, b))
 
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-    assert body.op == "ADD"
-    assert render(body) == "(a[0] + b[i])"
+    _assert_rangeified(expr, ("i",), (3,), "ADD", "(a[0] + b[i])")
 
 
 
@@ -2463,34 +2339,14 @@ def test_rangeify_reduce_sum_1d():
     a = P("a", "int", 5)
     expr = UOp("REDUCE", (a,), arg=("ADD", 0))
 
-    ranges, body = rangeify(expr)
-
-    assert len(ranges) == 1
-    assert ranges[0].op == "RANGE"
-    assert ranges[0].arg == "k"
-    assert run(ranges[0].src[0]) == 5
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 0)
-
-    element, = body.src
-    assert render(element) == "a[k]"
+    _assert_rangeified(expr, ("k",), (5,), "REDUCE", "a[k]", ("ADD", 0))
 
 
 def test_rangeify_reduce_sum_2d_axis1():
     a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
     expr = UOp("REDUCE", (a,), arg=("ADD", 1))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 1)
-
-    element, = body.src
-    assert render(element) == "a[((i * 3) + k)]"
+    _assert_rangeified(expr, ("i", "k"), (2, 3), "REDUCE", "a[((i * 3) + k)]", ("ADD", 1))
 
 
 
@@ -2498,64 +2354,30 @@ def test_rangeify_reduce_sum_2d_axis0():
     a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
     expr = UOp("REDUCE", (a,), arg=("ADD", 0))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (3, 2)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 0)
-
-    element, = body.src
-    assert render(element) == "a[((k * 3) + i)]"
+    _assert_rangeified(expr, ("i", "k"), (3, 2), "REDUCE", "a[((k * 3) + i)]", ("ADD", 0))
 
 
 def test_rangeify_reduce_sum_3d_axis1():
     a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
     expr = UOp("REDUCE", (a,), arg=("ADD", 1))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 4, 3)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 1)
-
-    element, = body.src
-    assert render(element) == "a[((i * 12) + ((k * 4) + j))]"
+    _assert_rangeified(expr, ("i", "j", "k"), (2, 4, 3), "REDUCE",
+                       "a[((i * 12) + ((k * 4) + j))]", ("ADD", 1))
 
 
 def test_rangeify_reduce_sum_3d_axis2():
     a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
     expr = UOp("REDUCE", (a,), arg=("ADD", 2))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3, 4)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 2)
-
-    element, = body.src
-    assert render(element) == "a[((i * 12) + ((j * 4) + k))]"
+    _assert_rangeified(expr, ("i", "j", "k"), (2, 3, 4), "REDUCE",
+                       "a[((i * 12) + ((j * 4) + k))]", ("ADD", 2))
 
 
 def test_rangeify_reduce_max_2d_axis1():
     a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
     expr = UOp("REDUCE", (a,), arg=("MAX", 1))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("i", "k")
-    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("MAX", 1)
-
-    element, = body.src
-    assert render(element) == "a[((i * 3) + k)]"
+    _assert_rangeified(expr, ("i", "k"), (2, 3), "REDUCE", "a[((i * 3) + k)]", ("MAX", 1))
 
 
 def test_rangeify_reduce_over_shrink():
@@ -2563,13 +2385,4 @@ def test_rangeify_reduce_over_shrink():
     shrunk = UOp("SHRINK", (a,), arg=((2, 7),))
     expr = UOp("REDUCE", (shrunk,), arg=("ADD", 0))
 
-    ranges, body = rangeify(expr)
-
-    assert tuple(r.arg for r in ranges) == ("k",)
-    assert tuple(run(r.src[0]) for r in ranges) == (5,)
-
-    assert body.op == "REDUCE"
-    assert body.arg == ("ADD", 0)
-
-    element, = body.src
-    assert render(element) == "a[(k + 2)]"
+    _assert_rangeified(expr, ("k",), (5,), "REDUCE", "a[(k + 2)]", ("ADD", 0))
