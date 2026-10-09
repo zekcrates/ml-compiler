@@ -1018,6 +1018,31 @@ def mul(a, b):
 
 
 def rangeify(expr):
+
+    if expr.op == "REDUCE":
+        op,axis = expr.arg 
+        out_shape = expr.shape 
+        reduce_size = expr.src[0].shape[axis]
+
+        names = ["i", "j", "k", "m"][:len(out_shape)]
+        out_idxs =  tuple(UOp("VAR", arg=name) for name in names)
+        out_ranges = tuple(
+             UOp("RANGE", (UOp("CONST", arg=size),), arg=name)
+            for name, size in zip(names, out_shape)
+        )
+        k = UOp("VAR", arg="k")
+        reduce_range = UOp(
+            "RANGE",
+            (UOp("CONST", arg=reduce_size),),
+            arg="k",
+        )
+        in_idxs = out_idxs[:axis] + (k,) + out_idxs[axis:]
+
+        element = lower_indexed(expr.src[0], in_idxs)
+        body = UOp("REDUCE", (element,), arg=(op, axis))
+
+        return out_ranges + (reduce_range,), body
+
     shape = expr.shape 
 
     names = ["i", "j", "k", "l"][:len(shape)]
@@ -1044,4 +1069,5 @@ def schedule(ranges,body):
     return out, loop, store, end 
 
 
+    
     

@@ -25,6 +25,39 @@ def V(name):
     return UOp("VAR", arg=name)
 
 
+INDEX_NAMES = ("i", "j", "k", "l")
+
+
+def _product(shape):
+    size = 1
+    for dimension in shape:
+        size *= dimension
+    return size
+
+
+def _tensor(name, shape, dtype="int"):
+    base = P(name, dtype, _product(shape))
+    return base if len(shape) == 1 else UOp("RESHAPE", (base,), arg=shape)
+
+
+def _indices(rank, names=INDEX_NAMES):
+    return tuple(V(name) for name in names[:rank])
+
+
+def _assert_rangeified(expr, names, sizes, body_op, rendered, body_arg=None):
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == names
+    assert tuple(run(r.src[0]) for r in ranges) == sizes
+    assert body.op == body_op
+
+    if body_arg is not None:
+        assert body.arg == body_arg
+
+    rendered_body = body.src[0] if body_op == "REDUCE" else body
+    assert render(rendered_body) == rendered
+
+
 # ============================================================
 # UOP CORE + HASH CONSING
 # ============================================================
@@ -622,15 +655,7 @@ def test_reshape():
     ],
 )
 def test_shrink(base_shape, arg, expected):
-    size = 1
-
-    for x in base_shape:
-        size *= x
-
-    base = P("x", "float", size)
-
-    if len(base_shape) > 1:
-        base = UOp("RESHAPE", (base,), arg=base_shape)
+    base = _tensor("x", base_shape, "float")
 
     assert UOp("SHRINK", (base,), arg=arg).shape == expected
 
@@ -674,15 +699,7 @@ def test_shrink_wrong_axes():
     ],
 )
 def test_flip(shape, axes):
-    size = 1
-
-    for x in shape:
-        size *= x
-
-    base = P("x", "float", size)
-
-    if len(shape) > 1:
-        base = UOp("RESHAPE", (base,), arg=shape)
+    base = _tensor("x", shape, "float")
 
     flipped = UOp("FLIP", (base,), arg=axes)
 
@@ -699,15 +716,7 @@ def test_flip(shape, axes):
     ],
 )
 def test_pad(shape, padding, expected):
-    size = 1
-
-    for x in shape:
-        size *= x
-
-    base = P("x", "float", size)
-
-    if len(shape) > 1:
-        base = UOp("RESHAPE", (base,), arg=shape)
+    base = _tensor("x", shape, "float")
 
     padded = UOp("PAD", (base,), arg=padding)
 
@@ -1943,15 +1952,6 @@ def test_reduce_composes():
         "}"
     )
 
-def test_lower_permute():
-    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
-    permuted = UOp("PERMUTE", (a, ), arg=(1,0))
-    assert permuted.shape == (3,2)
-
-    i, j = V("i"), V("j")
-    lowered = lower_indexed(permuted, (i, j ))
-    assert render(lowered) == "a[((j * 3) + i)]"
-
 def test_lower_expand_identity():
     a = P("a", "int", 3)
     expanded = UOp("EXPAND", (a, ), arg=(3,))
@@ -2016,225 +2016,96 @@ def test_end_to_end_1d():
     assert actual == expected
 
 
-def test_lower_reshape_1d():
-    a = P("a", "int", 5)
-    reshaped = UOp("RESHAPE", (a,), arg=(5,))       
-    assert render(lower(reshaped)) == "a[i]" 
+@pytest.mark.parametrize(
+    "shape,expected",
+    [
+        ((5,), "a[i]"),
+        ((2, 3), "a[((i * 3) + j)]"),
+        ((2, 3, 4), "a[((i * 12) + ((j * 4) + k))]"),
+        ((2, 3, 4, 5), "a[((i * 60) + ((j * 20) + ((k * 5) + l)))]"),
+    ],
+)
+def test_lower_reshape(shape, expected):
+    expr = UOp("RESHAPE", (P("a", "int", _product(shape)),), arg=shape)
+    lowered = lower(expr) if len(shape) == 1 else lower_indexed(expr, _indices(len(shape)))
+    assert render(lowered) == expected
 
 
-def test_lower_reshape_2d():
-    a = P("a", "int", 6)
-    reshaped = UOp("RESHAPE", (a,), arg=(2,3))
-    i,j = V("i"), V("j")
-    lowered = lower_indexed(reshaped, (i,j))
-    assert render(lowered) == "a[((i * 3) + j)]"
-
-def test_lower_reshape_3d():
-    a = P("a", "int", 24)
-    reshaped = UOp("RESHAPE", (a,), arg=(2, 3, 4))
-
-    i, j, k = V("i"), V("j"), V("k")
-    lowered = lower_indexed(reshaped, (i, j, k))
-    # slab i, row j, col k -> flat i*12 + j*4 + k
-    assert render(lowered) == "a[((i * 12) + ((j * 4) + k))]"
-
-def test_lower_reshape_4d():
-    a = P("a", "int", 120)
-    reshaped = UOp("RESHAPE", (a,), arg=(2, 3, 4, 5))
-
-    i, j, k, l = V("i"), V("j"), V("k"), V("l")
-    lowered = lower_indexed(reshaped, (i, j, k, l))
-    # strides: 60, 20, 5, 1 -> flat i*60 + j*20 + k*5 + l
-    assert render(lowered) == "a[((i * 60) + ((j * 20) + ((k * 5) + l)))]"
+@pytest.mark.parametrize(
+    "shape,order,output_shape,expected",
+    [
+        ((5,), (0,), (5,), "a[i]"),
+        ((2, 3), (1, 0), (3, 2), "a[((j * 3) + i)]"),
+        ((2, 3, 4), (2, 0, 1), (4, 2, 3), "a[((j * 12) + ((k * 4) + i))]"),
+        ((2, 3, 4, 5), (3, 1, 0, 2), (5, 3, 2, 4), "a[((k * 60) + ((j * 20) + ((l * 5) + i)))]"),
+        pytest.param((2, 3), (1, 0), (3, 2), "a[((j * 3) + i)]", id="basic_2d"),
+    ],
+)
+def test_lower_permute(shape, order, output_shape, expected):
+    expr = UOp("PERMUTE", (_tensor("a", shape),), arg=order)
+    assert expr.shape == output_shape
+    lowered = lower(expr) if len(shape) == 1 else lower_indexed(expr, _indices(len(output_shape)))
+    assert render(lowered) == expected
 
 
-def test_lower_permute_1d():
-    a = UOp("RESHAPE", (P("a", "int", 5),), arg=(5,))
-    permuted = UOp("PERMUTE", (a,), arg=(0,))
-    assert permuted.shape == (5,)
-
-    assert render(lower(permuted)) == "a[i]"        
-
-
-def test_lower_permute_2d():
-    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
-    permuted = UOp("PERMUTE", (a,), arg=(1, 0))
-    assert permuted.shape == (3, 2)
-
-    i, j = V("i"), V("j")
-    # out (i, j) -> in (j, i) -> flat j*3 + i
-    assert render(lower_indexed(permuted, (i, j))) == "a[((j * 3) + i)]"
+@pytest.mark.parametrize(
+    "shape,axes,expected",
+    [
+        ((3, 4), (0,), "a[(((2 - i) * 4) + j)]"),
+        ((2, 3, 4), (0, 2), "a[(((1 - i) * 12) + ((j * 4) + (3 - k)))]"),
+        ((2, 3, 4, 5), (1, 3), "a[((i * 60) + (((2 - j) * 20) + ((k * 5) + (4 - l))))]"),
+    ],
+)
+def test_lower_flip_nd(shape, axes, expected):
+    expr = UOp("FLIP", (_tensor("a", shape),), arg=axes)
+    assert expr.shape == shape
+    assert render(lower_indexed(expr, _indices(len(shape)))) == expected
 
 
-def test_lower_permute_3d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    permuted = UOp("PERMUTE", (a,), arg=(2, 0, 1))
-    # out axis k <- in axis 2, out axis i <- in axis 0, out axis j <- in axis 1
-    assert permuted.shape == (4, 2, 3)
-
-    i, j, k = V("i"), V("j"), V("k")
-    # out (i, j, k) -> in (j, k, i) -> strides of (2,3,4) are (12, 4, 1)
-    # flat = j*12 + k*4 + i
-    assert render(lower_indexed(permuted, (i, j, k))) == "a[((j * 12) + ((k * 4) + i))]"
-
-
-def test_lower_permute_4d():
-    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
-    permuted = UOp("PERMUTE", (a,), arg=(3, 1, 0, 2))
-    assert permuted.shape == (5, 3, 2, 4)
-
-    i, j, k, l = V("i"), V("j"), V("k"), V("l")
-    # out (i, j, k, l) -> in (k, j, l, i) -> strides (60, 20, 5, 1)
-    # flat = k*60 + j*20 + l*5 + i
-    assert render(lower_indexed(permuted, (i, j, k, l))) == "a[((k * 60) + ((j * 20) + ((l * 5) + i)))]"
-
-
-def test_lower_flip_2d_axis0():
-    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    flipped = UOp("FLIP", (a,), arg=(0,))          
-    assert flipped.shape == (3, 4)
-
-    i, j = V("i"), V("j")
-    # in tuple = ((2 - i), j) -> flat (2 - i)*4 + j
-    assert render(lower_indexed(flipped, (i, j))) == "a[(((2 - i) * 4) + j)]"
-
-
-def test_lower_flip_3d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    flipped = UOp("FLIP", (a,), arg=(0, 2))        
-    assert flipped.shape == (2, 3, 4)
-
-    i, j, k = V("i"), V("j"), V("k")
-    # in tuple = ((1 - i), j, (3 - k)) -> flat (1-i)*12 + j*4 + (3-k)
-    assert render(lower_indexed(flipped, (i, j, k))) == "a[(((1 - i) * 12) + ((j * 4) + (3 - k)))]"
-
-
-def test_lower_flip_4d():
-    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
-    flipped = UOp("FLIP", (a,), arg=(1, 3))      
-    assert flipped.shape == (2, 3, 4, 5)
-
-    i, j, k, l = V("i"), V("j"), V("k"), V("l")
-    # in tuple = (i, (2 - j), k, (4 - l)) -> flat i*60 + (2-j)*20 + k*5 + (4-l)
-    assert render(lower_indexed(flipped, (i, j, k, l))) == "a[((i * 60) + (((2 - j) * 20) + ((k * 5) + (4 - l))))]"
-
-
-def test_lower_shrink_2d_axis0():
-    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    shrunk = UOp("SHRINK", (a,), arg=((1, 3), (0, 4)))   
-    assert shrunk.shape == (2, 4)
-
-    i, j = V("i"), V("j")
-    # in tuple = (i + 1, j) -> flat (i + 1)*4 + j
-    assert render(lower_indexed(shrunk, (i, j))) == "a[(((i + 1) * 4) + j)]"
-
-
-def test_lower_shrink_2d_axis1():
-    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    shrunk = UOp("SHRINK", (a,), arg=((0, 3), (2, 4)))  
-    assert shrunk.shape == (3, 2)
-
-    i, j = V("i"), V("j")
-    # in tuple = (i, j + 2) -> flat i*4 + (j + 2)
-    assert render(lower_indexed(shrunk, (i, j))) == "a[((i * 4) + (j + 2))]"
-
-
-def test_lower_shrink_3d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    shrunk = UOp("SHRINK", (a,), arg=((1, 2), (0, 3), (2, 4)))
-    # out shape: (1, 3, 2)
-    assert shrunk.shape == (1, 3, 2)
-
-    i, j, k = V("i"), V("j"), V("k")
-    # in tuple = (i + 1, j, k + 2) -> flat (i+1)*12 + j*4 + (k+2)
-    assert render(lower_indexed(shrunk, (i, j, k))) == "a[(((i + 1) * 12) + ((j * 4) + (k + 2)))]"
-
-
-def test_lower_shrink_4d():
-    a = UOp("RESHAPE", (P("a", "int", 120),), arg=(2, 3, 4, 5))
-    shrunk = UOp("SHRINK", (a,), arg=((0, 2), (1, 3), (0, 4), (3, 5)))
-    # out shape: (2, 2, 4, 2)
-    assert shrunk.shape == (2, 2, 4, 2)
-
-    i, j, k, l = V("i"), V("j"), V("k"), V("l")
-    # in tuple = (i, j + 1, k, l + 3) -> flat i*60 + (j+1)*20 + k*5 + (l+3)
-    assert render(lower_indexed(shrunk, (i, j, k, l))) == "a[((i * 60) + (((j + 1) * 20) + ((k * 5) + (l + 3))))]"
+@pytest.mark.parametrize(
+    "shape,shrink,output_shape,expected",
+    [
+        ((3, 4), ((1, 3), (0, 4)), (2, 4), "a[(((i + 1) * 4) + j)]"),
+        ((3, 4), ((0, 3), (2, 4)), (3, 2), "a[((i * 4) + (j + 2))]"),
+        ((2, 3, 4), ((1, 2), (0, 3), (2, 4)), (1, 3, 2), "a[(((i + 1) * 12) + ((j * 4) + (k + 2)))]"),
+        ((2, 3, 4, 5), ((0, 2), (1, 3), (0, 4), (3, 5)), (2, 2, 4, 2), "a[((i * 60) + (((j + 1) * 20) + ((k * 5) + (l + 3))))]"),
+    ],
+)
+def test_lower_shrink_nd(shape, shrink, output_shape, expected):
+    expr = UOp("SHRINK", (_tensor("a", shape),), arg=shrink)
+    assert expr.shape == output_shape
+    assert render(lower_indexed(expr, _indices(len(output_shape)))) == expected
 
 
 
-def test_lower_pad_2d_axis0():
-    a = UOp("RESHAPE", (P("a", "int", 12),), arg=(3, 4))
-    padded = UOp("PAD", (a,), arg=((2, 0), (0, 0)))     
-    assert padded.shape == (5, 4)
-
-    i, j = V("i"), V("j")
-    assert render(lower_indexed(padded, (i, j))) == (
-        "((i < 2) ? 0 : a[(((i + -2) * 4) + j)])"
-    )
-
-def test_lower_pad_3d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    padded = UOp("PAD", (a,), arg=((1, 1), (0, 0), (0, 2)))
-    # out shape: (4, 3, 6)
-    assert padded.shape == (4, 3, 6)
-
-    i, j, k = V("i"), V("j"), V("k")
-    assert render(lower_indexed(padded, (i, j, k))) == (
-        "((i < 1) ? 0 : ((i < (1 + 2)) ? ((k < (0 + 4)) ? a[(((i + -1) * 12) + ((j * 4) + k))] : 0) : 0))"
-    )
-
-
-def test_lower_pad_4d():
-    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
-    padded = UOp("PAD", (a,), arg=((0, 0), (2, 1), (0, 0)))
-    # out shape: (2, 6, 4)
-    assert padded.shape == (2, 6, 4)
-
-    i, j, k = V("i"), V("j"), V("k")
-    assert render(lower_indexed(padded, (i, j, k))) == (
-        "((j < 2) ? 0 : ((j < (2 + 3)) ? a[((i * 12) + (((j + -2) * 4) + k))] : 0))"
-    )
+@pytest.mark.parametrize(
+    "shape,padding,output_shape,expected",
+    [
+        ((3, 4), ((2, 0), (0, 0)), (5, 4), "((i < 2) ? 0 : a[(((i + -2) * 4) + j)])"),
+        ((2, 3, 4), ((1, 1), (0, 0), (0, 2)), (4, 3, 6), "((i < 1) ? 0 : ((i < (1 + 2)) ? ((k < (0 + 4)) ? a[(((i + -1) * 12) + ((j * 4) + k))] : 0) : 0))"),
+        ((2, 3, 4), ((0, 0), (2, 1), (0, 0)), (2, 6, 4), "((j < 2) ? 0 : ((j < (2 + 3)) ? a[((i * 12) + (((j + -2) * 4) + k))] : 0))"),
+    ],
+)
+def test_lower_pad_nd(shape, padding, output_shape, expected):
+    expr = UOp("PAD", (_tensor("a", shape),), arg=padding)
+    assert expr.shape == output_shape
+    assert render(lower_indexed(expr, _indices(len(output_shape)))) == expected
 
 
 
-def test_lower_expand_2d():
-    a = UOp("RESHAPE", (P("a", "int", 3),), arg=(3, 1))
-    expanded = UOp("EXPAND", (a,), arg=(3,4))
-    assert expanded.shape == (3,4)
-    i, j = V("i"), V("j")
-    assert render(lower_indexed(expanded, (i, j))) == "a[((i * 1) + 0)]"
-
-
-def test_lower_expand_3d():
-    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3, 1))
-    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4))     
-    assert expanded.shape == (2, 3, 4)
-
-    i, j, k = V("i"), V("j"), V("k")
-    # in tuple = (i, j, 0) -> strides of (2,3,1) are (3, 1, 1)
-    # flat = i*3 + j*1 + 0
-    assert render(lower_indexed(expanded, (i, j, k))) == "a[((i * 3) + ((j * 1) + 0))]"
-
-
-def test_lower_expand_3d_middle():
-    a = UOp("RESHAPE", (P("a", "int", 8),), arg=(2, 1, 4))
-    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4))     # broadcast the MIDDLE axis
-    assert expanded.shape == (2, 3, 4)
-
-    i, j, k = V("i"), V("j"), V("k")
-    # in tuple = (i, 0, k) -> flat i*12 + 0*4 + k
-    assert render(lower_indexed(expanded, (i, j, k))) == "a[((i * 4) + ((0 * 4) + k))]"
-
-
-def test_lower_expand_4d():
-    a = UOp("RESHAPE", (P("a", "int", 8),), arg=(2, 1, 4, 1))
-    expanded = UOp("EXPAND", (a,), arg=(2, 3, 4, 5))  # two broadcast axes: 1 and 3
-    assert expanded.shape == (2, 3, 4, 5)
-
-    i, j, k, l = V("i"), V("j"), V("k"), V("l")
-    # in tuple = (i, 0, k, 0) -> strides (60, 20, 5, 1)
-    # flat = i*60 + 0*20 + k*5 + 0
-    assert render(lower_indexed(expanded, (i, j, k, l))) == "a[((i * 4) + ((0 * 4) + ((k * 1) + 0)))]"
+@pytest.mark.parametrize(
+    "input_shape,output_shape,expected",
+    [
+        ((3, 1), (3, 4), "a[((i * 1) + 0)]"),
+        ((2, 3, 1), (2, 3, 4), "a[((i * 3) + ((j * 1) + 0))]"),
+        ((2, 1, 4), (2, 3, 4), "a[((i * 4) + ((0 * 4) + k))]"),
+        ((2, 1, 4, 1), (2, 3, 4, 5), "a[((i * 4) + ((0 * 4) + ((k * 1) + 0)))]"),
+    ],
+)
+def test_lower_expand_nd(input_shape, output_shape, expected):
+    expr = UOp("EXPAND", (_tensor("a", input_shape),), arg=output_shape)
+    assert expr.shape == output_shape
+    assert render(lower_indexed(expr, _indices(len(output_shape)))) == expected
 
 
 def test_broadcast_lowered():
@@ -2274,23 +2145,6 @@ def test_lower_program_2d():
         "}\n"
         "}"
     )
-
-def test_lower_program_2d():
-    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
-    b = UOp("RESHAPE", (P("b", "int", 6),), arg=(2, 3))
-    expr = add(a, b)
-
-    prog = lower_program(expr)
-
-    assert render(prog) == (
-        "int out[6];\n"
-        "for (int i = 0; i < 2; i++)\n"
-        "for (int j = 0; j < 3; j++)\n"
-        "out[((i * 3) + j)] = (a[((i * 3) + j)] + b[((i * 3) + j)]);\n"
-        "}\n"
-        "}"
-    )
-
 
 def test_lower_program_3d():
     a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
@@ -2359,71 +2213,35 @@ def test_matmul_2x2_lowered():
 
 
 
-def test_rangeify_test_param():
-    a = P("a", "int", 3)
-    ranges,body  = rangeify(a)
+@pytest.mark.parametrize(
+    "expr_factory,body_op,rendered",
+    [
+        (lambda: P("a", "int", 3), "LOAD", "a[i]"),
+        (lambda: UOp("NEG", (P("a", "int", 3),)), "NEG", "(-a[i])"),
+    ],
+    ids=("param", "neg"),
+)
+def test_rangeify_rank1(expr_factory, body_op, rendered):
+    _assert_rangeified(expr_factory(), ("i",), (3,), body_op, rendered)
 
-    assert len(ranges) ==1 
-    assert ranges[0].op == "RANGE"
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
 
-    assert body.op == "LOAD"
-    assert render(body) == "a[i]"
-
-
-def test_schedule_rangeified_param():
-    a = P("a", "int", 3)
-    ranges, body = rangeify(a)
-
-    scheduled = schedule(ranges, body)
-    out, loop, store, end = scheduled
+@pytest.mark.parametrize(
+    "expr_factory",
+    [
+        lambda: P("a", "int", 3),
+        lambda: UOp("NEG", (P("a", "int", 3),)),
+    ],
+    ids=("param", "neg"),
+)
+def test_schedule_rangeified_rank1(expr_factory):
+    ranges, body = rangeify(expr_factory())
+    out, loop, store, end = schedule(ranges, body)
 
     assert out.op == "ALLOC"
     assert out.arg == ParamArg("out", "int", 3)
     assert loop is ranges[0]
-
     assert store.op == "STORE"
-    pointer, value = store.src
-    assert pointer.op == "INDEX"
-    assert pointer.src == (out, V("i"))
-    assert value is body
-
-    assert end.op == "END"
-    assert end.src == (out, loop)
-def test_rangeify_neg():
-    a = P("a", "int", 3)
-    expr = UOp("NEG", (a,))
-    ranges,body = rangeify(expr)
-    assert len(ranges) == 1
-    assert ranges[0].op == "RANGE"
-    assert ranges[0].arg == "i"
-    assert run(ranges[0].src[0]) == 3
-
-    assert body.op == "NEG"
-    assert render(body) == "(-a[i])"
-
-
-def test_schedule_neg():
-    a  = P("a","int", 3)
-    expr =UOp("NEG", (a,))
-    ranges,body = rangeify(expr)
-    scheduled = schedule(ranges, body)
-    out,loop, store, end = scheduled
-    assert out.op == "ALLOC"
-    assert out.arg == ParamArg("out", "int", 3)
-
-    assert loop is ranges[0]
-
-    assert store.op == "STORE"
-
-    pointer, value = store.src
-
-    assert pointer.op == "INDEX"
-    assert pointer.src == (out, V("i"))
-    assert value is body
-
-    assert end.op == "END"
+    assert store.src == (UOp("INDEX", (out, V("i"))), body)
     assert end.src == (out, loop)
 
 
@@ -2638,3 +2456,120 @@ def test_rangeify_elementwise_view():
     assert run(ranges[0].src[0]) == 3
     assert body.op == "ADD"
     assert render(body) == "(a[0] + b[i])"
+
+
+
+def test_rangeify_reduce_sum_1d():
+    a = P("a", "int", 5)
+    expr = UOp("REDUCE", (a,), arg=("ADD", 0))
+
+    ranges, body = rangeify(expr)
+
+    assert len(ranges) == 1
+    assert ranges[0].op == "RANGE"
+    assert ranges[0].arg == "k"
+    assert run(ranges[0].src[0]) == 5
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 0)
+
+    element, = body.src
+    assert render(element) == "a[k]"
+
+
+def test_rangeify_reduce_sum_2d_axis1():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    expr = UOp("REDUCE", (a,), arg=("ADD", 1))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 1)
+
+    element, = body.src
+    assert render(element) == "a[((i * 3) + k)]"
+
+
+
+def test_rangeify_reduce_sum_2d_axis0():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    expr = UOp("REDUCE", (a,), arg=("ADD", 0))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (3, 2)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 0)
+
+    element, = body.src
+    assert render(element) == "a[((k * 3) + i)]"
+
+
+def test_rangeify_reduce_sum_3d_axis1():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    expr = UOp("REDUCE", (a,), arg=("ADD", 1))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 4, 3)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 1)
+
+    element, = body.src
+    assert render(element) == "a[((i * 12) + ((k * 4) + j))]"
+
+
+def test_rangeify_reduce_sum_3d_axis2():
+    a = UOp("RESHAPE", (P("a", "int", 24),), arg=(2, 3, 4))
+    expr = UOp("REDUCE", (a,), arg=("ADD", 2))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "j", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3, 4)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 2)
+
+    element, = body.src
+    assert render(element) == "a[((i * 12) + ((j * 4) + k))]"
+
+
+def test_rangeify_reduce_max_2d_axis1():
+    a = UOp("RESHAPE", (P("a", "int", 6),), arg=(2, 3))
+    expr = UOp("REDUCE", (a,), arg=("MAX", 1))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("i", "k")
+    assert tuple(run(r.src[0]) for r in ranges) == (2, 3)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("MAX", 1)
+
+    element, = body.src
+    assert render(element) == "a[((i * 3) + k)]"
+
+
+def test_rangeify_reduce_over_shrink():
+    a = P("a", "int", 10)
+    shrunk = UOp("SHRINK", (a,), arg=((2, 7),))
+    expr = UOp("REDUCE", (shrunk,), arg=("ADD", 0))
+
+    ranges, body = rangeify(expr)
+
+    assert tuple(r.arg for r in ranges) == ("k",)
+    assert tuple(run(r.src[0]) for r in ranges) == (5,)
+
+    assert body.op == "REDUCE"
+    assert body.arg == ("ADD", 0)
+
+    element, = body.src
+    assert render(element) == "a[(k + 2)]"
