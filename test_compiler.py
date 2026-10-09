@@ -1970,6 +1970,34 @@ def test_broadcast_shape_propagation():
 
 
 
+@pytest.mark.parametrize(
+    "op",
+    ["DIV", "MAX", "CMPNE", "CMPLT", "FLOORDIV", "FLOORMOD"],
+)
+def test_binary_shape_propagation(op):
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+
+    assert UOp(op, (a, b)).shape == (3,)
+
+
+@pytest.mark.parametrize("op", ["RECIP", "EXP2", "LOG2", "CAST"])
+def test_unary_shape_propagation(op):
+    a = P("a", "float", 3)
+
+    expr = UOp(op, (a,), arg="int") if op == "CAST" else UOp(op, (a,))
+
+    assert expr.shape == (3,)
+
+
+def test_where_shape_propagation():
+    cond = P("cond", "bool", 3)
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+
+    assert UOp("WHERE", (cond, a, b)).shape == (3,)
+
+
 def test_lower_stack():
     a = P("a","int", 3  )
     b = P("b", "int", 3)
@@ -2399,6 +2427,65 @@ def test_rangeify_reduce_over_shrink():
         ("FLOORMOD", "(a[i] % b[i])"),
     ],
 )
+def test_rangeify_binary_ops(op, expected):
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    expr = UOp(op, (a, b))
+
+    _assert_rangeified(expr, ("i",), (3,), op, expected)
+
+
+@pytest.mark.parametrize(
+    "expr, expected",
+    [
+        (
+            UOp("RECIP", (P("a", "float", 3),)),
+            "(1.0 / a[i])",
+        ),
+        (
+            UOp("EXP2", (P("a", "float", 3),)),
+            "exp2(a[i])",
+        ),
+        (
+            UOp("LOG2", (P("a", "float", 3),)),
+            "log2(a[i])",
+        ),
+        (
+            UOp("CAST", (P("a", "int", 3),), arg="float"),
+            "((float)a[i])",
+        ),
+    ],
+)
+def test_rangeify_unary_ops(expr, expected):
+    _assert_rangeified(expr, ("i",), (3,), expr.op, expected)
+
+
+def test_rangeify_where():
+    cond = P("cond", "bool", 3)
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+    expr = UOp("WHERE", (cond, a, b))
+
+    _assert_rangeified(
+        expr,
+        ("i",),
+        (3,),
+        "WHERE",
+        "(cond[i] ? a[i] : b[i])",
+    )
+
+
+@pytest.mark.parametrize(
+    "op, expected",
+    [
+        ("DIV", "(a[i] / b[i])"),
+        ("MAX", "max(a[i], b[i])"),
+        ("CMPNE", "(a[i] != b[i])"),
+        ("CMPLT", "(a[i] < b[i])"),
+        ("FLOORDIV", "(a[i] // b[i])"),
+        ("FLOORMOD", "(a[i] % b[i])"),
+    ],
+)
 def test_lower_indexed_binary_ops(op, expected):
     a = P("a", "int", 3)
     b = P("b", "int", 3)
@@ -2447,3 +2534,38 @@ def test_lower_indexed_where():
     lowered = lower_indexed(expr, (V("i"),))
 
     assert render(lowered) == "(cond[i] ? a[i] : b[i])"
+
+
+def test_lower_stack_leading_axis():
+    a = P("a", "int", 3)
+    b = P("b", "int", 3)
+
+    expr = UOp("STACK", (a, b))
+
+    assert expr.shape == (2, 3)
+
+    lowered = lower_indexed(
+        expr,
+        (V("i"), V("j")),
+    )
+
+    assert render(lowered) == "((i < 1) ? a[j] : b[j])"
+
+
+def test_lower_stack_three_inputs():
+    a = P("a", "int", 3 )
+    b = P("b", "int", 3 )
+    c = P("c", "int", 3 )
+    expr = UOp("STACK", (a, b, c))
+
+    assert expr.shape == (3, 3)
+
+    lowered = lower_indexed(
+        expr,
+        (V("i"), V("j")),
+    )
+
+    assert render(lowered) == (
+        "((i < 1) ? a[j] : "
+        "((i < 2) ? b[j] : c[j]))"
+    )

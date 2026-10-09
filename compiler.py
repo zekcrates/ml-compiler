@@ -63,7 +63,7 @@ class UOp:
     @property
     def shape(self):
         if self.op == "CONST": return ()
-        if self.op in ("ADD", "SUB", "MUL")  : 
+        if self.op in ("ADD", "SUB", "MUL", "DIV", "MAX", "CMPNE", "CMPLT", "FLOORDIV", "FLOORMOD")  : 
             sa, sb = self.src[0].shape, self.src[1].shape
             if len(sa) != len(sb):
                 raise ValueError("Shapes don't match")
@@ -78,6 +78,26 @@ class UOp:
                 else:
                     raise ValueError("Shapes don't match")
             return tuple(out)
+
+        if self.op in ("NEG", "RECIP", "EXP2", "LOG2", "CAST"):
+            return self.src[0].shape
+
+        if self.op == "WHERE":
+            sa, sb = self.src[1].shape, self.src[2].shape
+            if len(sa) != len(sb):
+                raise ValueError("Shapes don't match")
+            out = []
+            for x, y in zip(sa, sb):
+                if x == y:
+                    out.append(x)
+                elif y == 1:
+                    out.append(x)
+                elif x == 1:
+                    out.append(y)
+                else:
+                    raise ValueError("Shapes don't match")
+            return tuple(out)
+
         if self.op == "PARAM": return (self.arg.size,) 
         if self.op in ("BUFFER", "ALLOC"):
             return (self.arg.size, ) 
@@ -850,20 +870,26 @@ def lower_indexed(expr, idxs):
         return lower_indexed(expr.src[0], tuple(in_idx))
 
     if expr.op == "STACK":
-        a_size = expr.src[0].shape[0] 
-        b_size = expr.src[1].shape[0]
-        a_const = UOp("CONST", arg=a_size)
-        b_const = UOp("CONST", arg=b_size)
-        i_less_a = UOp("CMPLT", (i, a_const))
-        i_fd_a = UOp("FLOORMOD", (i , a_const))
-        i_fd_b = UOp("FLOORMOD", (i, b_const))
-        a_idx = UOp("INDEX", (expr.src[0], i_fd_a))
-        b_idx = UOp("INDEX",(expr.src[1], i_fd_b))
-        a_ld = UOp("LOAD", (a_idx,))
-        b_ld = UOp("LOAD", (b_idx,))
 
-        whr = UOp("WHERE", (i_less_a,a_ld,b_ld))
-        return whr 
+        stack_index = idxs[0]
+        inner_idxs = tuple(idxs[1:])
+        result = lower_indexed(expr.src[-1], inner_idxs)
+        for pos in reversed(range(len(expr.src) -1)):
+            candidate = lower_indexed(
+                expr.src[pos], inner_idxs, 
+            )
+            condition = UOp("CMPLT", 
+                            (stack_index, UOp("CONST", arg=pos +1 ), ), )
+            result = UOp(
+            "WHERE",
+            (
+                condition,
+                candidate,
+                result,
+            ),
+        )
+        return result 
+
     if expr.op == "RESHAPE":
         shape = expr.arg 
         flat = idxs[-1]
